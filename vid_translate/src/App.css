@@ -1,0 +1,159 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 90px;
+  padding: 0 16px;
+  background: rgba(0, 0, 0, 0.78);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  border-radius: 10px;
+  cursor: move;
+}
+
+.bar--setup {
+  flex-wrap: wrap;
+  gap: 6px;
+  height: auto;
+  min-height: 90px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.btn {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+.btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transition: background 0.3s;
+}
+
+.dot--listening {
+  background: #4ade80;
+  box-shadow: 0 0 6px #4ade80;
+  animation: pulse 1.5s infinite;
+}
+
+.dot--processing {
+  background: #facc15;
+  box-shadow: 0 0 6px #facc15;
+}
+
+.dot--loading {
+  background: #60a5fa;
+  box-shadow: 0 0 6px #60a5fa;
+  animation: pulse 1s infinite;
+}
+
+.dot--idle,
+.dot--error {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.transcript {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+  cursor: move;
+}
+
+.lines {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+}
+
+.line {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 18px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Completed sentence — solid white, like YouTube confirmed captions */
+.line--final {
+  color: #ffffff;
+  font-weight: 500;
+}
+
+/* Words being spoken right now — dimmer, like YouTube's live prediction */
+.line--partial {
+  color: rgba(255, 255, 255, 0.55);
+  font-weight: 400;
+}
+
+.placeholder {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.35);
+  font-style: italic;
+}
+
+.setup-text {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  flex: 1;
+}
+
+.setup-text code {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: #facc15;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
