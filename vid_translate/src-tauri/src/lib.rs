@@ -1,6 +1,5 @@
 mod audio;
 mod recognizer;
-mod transcriber;
 
 use serde::Serialize;
 use std::sync::{
@@ -42,14 +41,6 @@ fn vosk_model_path() -> std::path::PathBuf {
         .join("vosk-model")
 }
 
-fn whisper_model_path() -> std::path::PathBuf {
-    let models_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("vid_translate")
-        .join("models");
-    let tiny = models_dir.join("ggml-tiny.bin");
-    if tiny.exists() { tiny } else { models_dir.join("ggml-base.bin") }
-}
 
 #[tauri::command]
 fn get_model_path() -> String {
