@@ -14,22 +14,28 @@ impl Transcriber {
         Ok(Self { ctx })
     }
 
-    /// Transcribe a chunk of 16kHz mono f32 audio, translating to English.
-    /// Returns the transcribed text, or an empty string if nothing was detected.
-    pub fn transcribe(&self, audio: &[f32]) -> Result<String, String> {
+    /// Transcribe 16kHz mono f32 audio and translate it to English.
+    /// `language` should be an ISO-639-1 code (e.g. "ja") or "auto".
+    /// Returns transcribed English text, empty string if nothing detected.
+    pub fn transcribe(&self, audio: &[f32], language: &str) -> Result<String, String> {
         let mut state = self
             .ctx
             .create_state()
             .map_err(|e| format!("State error: {:?}", e))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_translate(true);        // always output English
-        params.set_language(Some("auto")); // auto-detect source language
+        params.set_translate(true);
+        params.set_language(Some(language));
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
+        // Lower the no-speech threshold so vocals in music aren't silently skipped.
+        // Default is 0.6; 0.3 keeps Whisper attentive to singing.
+        params.set_no_speech_thold(0.3);
+        // Hint to the model that the audio is likely song lyrics.
+        params.set_initial_prompt("Song lyrics:");
 
         state
             .full(params, audio)

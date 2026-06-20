@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 const FINAL_LINGER_MS = 2500;
-// Max words visible at once — older words slide off as new ones arrive
 const MAX_WORDS = 10;
 
 function slideWindow(text) {
@@ -13,17 +12,22 @@ function slideWindow(text) {
 }
 
 export default function App() {
-  // Single caption: array of words + whether it's still partial
   const [words, setWords] = useState([]);
   const [isPartial, setIsPartial] = useState(false);
   const [status, setStatus] = useState("idle");
   const [modelPath, setModelPath] = useState("");
+  const [whisperModelPath, setWhisperModelPath] = useState("");
+  const [voskJaModelPath, setVoskJaModelPath] = useState("");
   const [running, setRunning] = useState(false);
+  // "vosk" = real-time English, "vosk-ja" = streaming JA + translated EN finals
+  const [mode, setMode] = useState("vosk");
   const unlistenRefs = useRef([]);
   const clearTimer = useRef(null);
 
   useEffect(() => {
     invoke("get_model_path").then(setModelPath);
+    invoke("get_whisper_model_path").then(setWhisperModelPath);
+    invoke("get_vosk_ja_model_path").then(setVoskJaModelPath);
 
     const setupListeners = async () => {
       const unlistenTx = await listen("transcription", (event) => {
@@ -34,7 +38,6 @@ export default function App() {
           setWords(slideWindow(text));
           setIsPartial(true);
         } else {
-          // Final: show all words fully lit, then clear
           setWords(slideWindow(text));
           setIsPartial(false);
           clearTimer.current = setTimeout(() => {
@@ -46,7 +49,13 @@ export default function App() {
 
       const unlistenStatus = await listen("status", (event) => {
         setStatus(event.payload.state);
-        if (event.payload.state === "model_missing") setRunning(false);
+        if (
+          event.payload.state === "model_missing" ||
+          event.payload.state === "whisper_model_missing" ||
+          event.payload.state === "vosk_ja_model_missing"
+        ) {
+          setRunning(false);
+        }
       });
 
       unlistenRefs.current = [unlistenTx, unlistenStatus];
@@ -67,8 +76,12 @@ export default function App() {
     } else {
       setWords([]);
       setRunning(true);
-      await invoke("start_listening");
+      await invoke("start_listening", { mode });
     }
+  };
+
+  const toggleMode = () => {
+    if (!running) setMode((m) => (m === "vosk" ? "vosk-ja" : "vosk"));
   };
 
   if (status === "model_missing") {
@@ -88,17 +101,59 @@ export default function App() {
     );
   }
 
+  if (status === "whisper_model_missing") {
+    return (
+      <div className="bar bar--setup" data-tauri-drag-region>
+        <span className="setup-text">
+          Whisper model not found. Run:
+          <code>
+            mkdir -p ~/.local/share/vid_translate/models && curl -L
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+            -o {whisperModelPath}
+          </code>
+        </span>
+        <button className="btn" onClick={toggle}>Retry</button>
+      </div>
+    );
+  }
+
+  if (status === "vosk_ja_model_missing") {
+    return (
+      <div className="bar bar--setup" data-tauri-drag-region>
+        <span className="setup-text">
+          Vosk Japanese model not found. Run:
+          <code>
+            curl -L https://alphacephei.com/vosk/models/vosk-model-ja-0.22.zip
+            -o /tmp/vosk-ja.zip && unzip /tmp/vosk-ja.zip -d /tmp && mv
+            /tmp/vosk-model-ja-0.22 {voskJaModelPath}
+          </code>
+        </span>
+        <button className="btn" onClick={toggle}>Retry</button>
+      </div>
+    );
+  }
+
+  const placeholderText = running
+    ? "Listening…"
+    : "Press ▶ to start";
+
   return (
     <div className="bar" data-tauri-drag-region>
       <button className="btn" onClick={toggle} title={running ? "Stop" : "Start"}>
         {running ? "■" : "▶"}
       </button>
+      <button
+        className={`btn btn--mode ${mode === "vosk-ja" ? "btn--mode-active" : ""}`}
+        onClick={toggleMode}
+        title={running ? "Stop to change mode" : mode === "vosk" ? "Switch to Japanese→English" : "Switch to English"}
+        disabled={running}
+      >
+        {mode === "vosk" ? "EN" : "JA"}
+      </button>
       <span className={`dot dot--${status}`} />
       <div className="transcript" data-tauri-drag-region>
         {words.length === 0 ? (
-          <span className="placeholder">
-            {running ? "Listening…" : "Press ▶ to start"}
-          </span>
+          <span className="placeholder">{placeholderText}</span>
         ) : (
           <span className="caption">
             {words.map((word, i) => {

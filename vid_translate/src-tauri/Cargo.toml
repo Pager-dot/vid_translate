@@ -26,4 +26,6 @@ tokio = { version = "1", features = ["full"] }
 whisper-rs = "0.14"
 vosk = "0.3"
 dirs = "5"
+ureq = { version = "2", features = ["json"] }
+urlencoding = "2"
 
