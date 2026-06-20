@@ -32,7 +32,7 @@ where
 
     for chunk in rx {
         let result = match rec.accept_waveform(&chunk) {
-            DecodingState::Running => {
+            Ok(DecodingState::Running) => {
                 let text = rec.partial_result().partial.trim().to_string();
                 if text.is_empty() {
                     RecognitionResult::Silent
@@ -40,7 +40,7 @@ where
                     RecognitionResult::Partial(text)
                 }
             }
-            DecodingState::Finalized => {
+            Ok(DecodingState::Finalized) => {
                 let text = rec
                     .final_result()
                     .single()
@@ -52,7 +52,7 @@ where
                     RecognitionResult::Final(text)
                 }
             }
-            DecodingState::Failed => RecognitionResult::Silent,
+            Ok(DecodingState::Failed) | Err(_) => RecognitionResult::Silent,
         };
 
         on_result(result);
