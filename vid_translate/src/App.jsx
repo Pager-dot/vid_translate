@@ -12,17 +12,32 @@ function slideWindow(text) {
 }
 
 export default function App() {
-  const [words, setWords] = useState([]);
-  const [isPartial, setIsPartial] = useState(false);
-  const [status, setStatus] = useState("idle");
-  const [modelPath, setModelPath] = useState("");
+  // English mode state
+  const [words, setWords]           = useState([]);
+  const [currentJa, setCurrentJa]   = useState("");
+  const [isPartial, setIsPartial]   = useState(false);
+  // JA drama mode state
+  const [translationHistory, setTranslationHistory] = useState([]);
+  const [japaneseStream, setJapaneseStream]         = useState("");
+  const historyEndRef = useRef(null);
+
+  const [status, setStatus]         = useState("idle");
+  const [modelPath, setModelPath]   = useState("");
   const [whisperModelPath, setWhisperModelPath] = useState("");
-  const [voskJaModelPath, setVoskJaModelPath] = useState("");
-  const [running, setRunning] = useState(false);
-  // "vosk" = real-time English, "vosk-ja" = streaming JA + translated EN finals
-  const [mode, setMode] = useState("vosk");
+  const [voskJaModelPath, setVoskJaModelPath]   = useState("");
+  const [running, setRunning]       = useState(false);
+  const [mode, setMode]             = useState("vosk");
+
   const unlistenRefs = useRef([]);
-  const clearTimer = useRef(null);
+  const clearTimer   = useRef(null);
+
+  // Auto-scroll history to bottom whenever a new translation lands
+  useEffect(() => {
+    historyEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [translationHistory]);
+  // Ref so the event listener always sees the current mode without re-registering
+  const modeRef = useRef(mode);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
 
   useEffect(() => {
     invoke("get_model_path").then(setModelPath);
@@ -31,29 +46,44 @@ export default function App() {
 
     const setupListeners = async () => {
       const unlistenTx = await listen("transcription", (event) => {
-        const { text, type: kind } = event.payload;
-        clearTimeout(clearTimer.current);
+        const { text, current, type: kind } = event.payload;
 
-        if (kind === "partial") {
-          setWords(slideWindow(text));
-          setIsPartial(true);
+        if (modeRef.current === "vosk-ja") {
+          // ── JA drama mode ──────────────────────────────────────────────
+          if (kind === "partial") {
+            setJapaneseStream(text);
+          } else {
+            setTranslationHistory((h) => {
+              // Skip if identical to the last entry (flush + Final race)
+              if (h.length > 0 && h[h.length - 1] === text) return h;
+              return [...h, text];
+            });
+            setJapaneseStream("");
+          }
         } else {
-          setWords(slideWindow(text));
-          setIsPartial(false);
-          clearTimer.current = setTimeout(() => {
-            setWords([]);
+          // ── English mode ────────────────────────────────────────────────
+          clearTimeout(clearTimer.current);
+          if (kind === "partial") {
+            setWords(slideWindow(text));
+            setCurrentJa(current || "");
+            setIsPartial(true);
+          } else {
+            setWords(slideWindow(text));
+            setCurrentJa("");
             setIsPartial(false);
-          }, FINAL_LINGER_MS);
+            clearTimer.current = setTimeout(() => {
+              setWords([]);
+              setCurrentJa("");
+              setIsPartial(false);
+            }, FINAL_LINGER_MS);
+          }
         }
       });
 
       const unlistenStatus = await listen("status", (event) => {
         setStatus(event.payload.state);
-        if (
-          event.payload.state === "model_missing" ||
-          event.payload.state === "whisper_model_missing" ||
-          event.payload.state === "vosk_ja_model_missing"
-        ) {
+        if (["model_missing", "whisper_model_missing", "vosk_ja_model_missing"]
+            .includes(event.payload.state)) {
           setRunning(false);
         }
       });
@@ -73,8 +103,14 @@ export default function App() {
       await invoke("stop_listening");
       setRunning(false);
       setWords([]);
+      setCurrentJa("");
+      setTranslationHistory([]);
+      setJapaneseStream("");
     } else {
       setWords([]);
+      setCurrentJa("");
+      setTranslationHistory([]);
+      setJapaneseStream("");
       setRunning(true);
       await invoke("start_listening", { mode });
     }
@@ -84,6 +120,7 @@ export default function App() {
     if (!running) setMode((m) => (m === "vosk" ? "vosk-ja" : "vosk"));
   };
 
+  // ── Setup screens ──────────────────────────────────────────────────────────
   if (status === "model_missing") {
     return (
       <div className="bar bar--setup" data-tauri-drag-region>
@@ -133,36 +170,84 @@ export default function App() {
     );
   }
 
-  const placeholderText = running
-    ? "Listening…"
-    : "Press ▶ to start";
+  // ── JA drama mode layout ──────────────────────────────────────────────────
+  if (mode === "vosk-ja") {
+    return (
+      <div className="bar bar--ja" data-tauri-drag-region>
+        <div className="ja-controls">
+          <button className="btn" onClick={toggle} title={running ? "Stop" : "Start"}>
+            {running ? "■" : "▶"}
+          </button>
+          <button
+            className="btn btn--mode btn--mode-active"
+            onClick={toggleMode}
+            disabled={running}
+            title="Switch to English mode"
+          >
+            JA
+          </button>
+          <span className={`dot dot--${status}`} />
+        </div>
 
+        <div className="ja-body" data-tauri-drag-region>
+          <div className="ja-history">
+            {translationHistory.length === 0 ? (
+              <span className="placeholder">
+                {running ? "Listening…" : "Press ▶ to start"}
+              </span>
+            ) : (
+              translationHistory.map((line, i) => (
+                <div
+                  key={i}
+                  className={
+                    i === translationHistory.length - 1
+                      ? "ja-history-item ja-history-item--latest"
+                      : "ja-history-item"
+                  }
+                >
+                  {line}
+                </div>
+              ))
+            )}
+            <div ref={historyEndRef} />
+          </div>
+          {japaneseStream && (
+            <div className="ja-japanese">{japaneseStream}</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── English mode layout ───────────────────────────────────────────────────
   return (
     <div className="bar" data-tauri-drag-region>
       <button className="btn" onClick={toggle} title={running ? "Stop" : "Start"}>
         {running ? "■" : "▶"}
       </button>
       <button
-        className={`btn btn--mode ${mode === "vosk-ja" ? "btn--mode-active" : ""}`}
+        className="btn btn--mode"
         onClick={toggleMode}
-        title={running ? "Stop to change mode" : mode === "vosk" ? "Switch to Japanese→English" : "Switch to English"}
+        title="Switch to Japanese→English"
         disabled={running}
       >
-        {mode === "vosk" ? "EN" : "JA"}
+        EN
       </button>
       <span className={`dot dot--${status}`} />
       <div className="transcript" data-tauri-drag-region>
-        {words.length === 0 ? (
-          <span className="placeholder">{placeholderText}</span>
+        {words.length === 0 && !currentJa ? (
+          <span className="placeholder">
+            {running ? "Listening…" : "Press ▶ to start"}
+          </span>
         ) : (
           <span className="caption">
             {words.map((word, i) => {
-              const isCurrentWord = isPartial && i === words.length - 1;
+              const isEnLive = !currentJa && isPartial && i === words.length - 1;
               return (
                 <span
                   key={i}
                   className={
-                    isCurrentWord
+                    isEnLive
                       ? "word word--current"
                       : isPartial
                       ? "word word--spoken"
@@ -170,10 +255,13 @@ export default function App() {
                   }
                 >
                   {word}
-                  {i < words.length - 1 ? " " : ""}
+                  {(i < words.length - 1 || currentJa) ? " " : ""}
                 </span>
               );
             })}
+            {currentJa && (
+              <span className="word word--current-ja">{currentJa}</span>
+            )}
           </span>
         )}
       </div>

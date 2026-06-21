@@ -3,6 +3,7 @@ mod recognizer;
 mod transcriber;
 
 use serde::Serialize;
+use std::io::{BufRead, BufReader, Write};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -12,6 +13,9 @@ use tauri::Emitter;
 #[derive(Serialize, Clone)]
 struct TranscriptionEvent {
     text: String,
+    // JA mode only: the word currently being spoken, still in Japanese.
+    // Empty in English mode and on final events.
+    current: String,
     #[serde(rename = "type")]
     kind: String, // "partial" | "final"
 }
@@ -72,24 +76,51 @@ fn get_whisper_model_path() -> String {
     whisper_model_path().to_string_lossy().to_string()
 }
 
-/// Translate Japanese text to English via MyMemory (free, no API key needed).
-/// Blocks for ~200–500ms — called only on finals, not on every partial.
-fn translate_ja_en(text: &str) -> String {
-    let q = urlencoding::encode(text);
-    let url = format!(
-        "https://api.mymemory.translated.net/get?q={}&langpair=ja|en",
-        q
-    );
-    ureq::get(&url)
-        .call()
-        .ok()
-        .and_then(|r| r.into_json::<serde_json::Value>().ok())
-        .and_then(|j| {
-            j["responseData"]["translatedText"]
-                .as_str()
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default()
+fn translate_server_path() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("vid_translate")
+        .join("translate_server.py")
+}
+
+/// Spawns the argostranslate Python server and returns (stdin_writer, stdout_reader).
+/// The server stays alive for the lifetime of the pipeline — no per-call startup cost.
+fn spawn_translate_server() -> Result<
+    (
+        std::io::BufWriter<std::process::ChildStdin>,
+        BufReader<std::process::ChildStdout>,
+    ),
+    String,
+> {
+    let script = translate_server_path();
+    if !script.exists() {
+        return Err(format!(
+            "translate_server.py not found at {}",
+            script.display()
+        ));
+    }
+
+    let mut child = std::process::Command::new("python3")
+        .arg(&script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn translate_server.py: {}", e))?;
+
+    let stdin = std::io::BufWriter::new(child.stdin.take().unwrap());
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Wait for "READY" line before returning
+    let mut ready = String::new();
+    stdout
+        .read_line(&mut ready)
+        .map_err(|e| format!("translate server did not send READY: {}", e))?;
+
+    // Leak the child so it stays alive; it exits when stdin is dropped
+    std::mem::forget(child);
+
+    Ok((stdin, stdout))
 }
 
 #[tauri::command]
@@ -143,12 +174,14 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
                 Partial(text) => {
                     let _ = app_for_result.emit("transcription", TranscriptionEvent {
                         text,
+                        current: String::new(),
                         kind: "partial".into(),
                     });
                 }
                 Final(text) => {
                     let _ = app_for_result.emit("transcription", TranscriptionEvent {
                         text,
+                        current: String::new(),
                         kind: "final".into(),
                     });
                 }
@@ -173,35 +206,89 @@ fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
     }
 
     let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
+
+    let (mut tx_stdin, rx_stdout) = match spawn_translate_server() {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("[translate] {}", e);
+            let _ = app_handle.emit("status", StatusEvent { state: "error".into() });
+            return;
+        }
+    };
+
     let rx = audio::start_capture(stop_flag.clone());
-    let app_for_result = app_handle.clone();
     let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
 
+    let (tx_phrase, rx_phrase) = std::sync::mpsc::channel::<String>();
+    let app_for_translate = app_handle.clone();
+
+    // Translation thread owns the subprocess pipes and emits English finals
+    // directly as soon as each translation completes — no polling needed.
+    std::thread::spawn(move || {
+        let mut stdout = rx_stdout;
+        while let Ok(phrase) = rx_phrase.recv() {
+            // If requests piled up while we were translating, only do the latest
+            let latest = std::iter::once(phrase)
+                .chain(rx_phrase.try_iter())
+                .last()
+                .unwrap();
+
+            if writeln!(tx_stdin, "{}", latest).is_err() { break; }
+            if tx_stdin.flush().is_err() { break; }
+
+            let mut english = String::new();
+            if stdout.read_line(&mut english).is_err() { break; }
+            let english = english.trim().to_string();
+
+            if !english.is_empty() {
+                let _ = app_for_translate.emit("transcription", TranscriptionEvent {
+                    text: english,
+                    current: String::new(),
+                    kind: "final".into(),
+                });
+            }
+        }
+    });
+
+    // Force-translate if no sentence boundary for FLUSH_SECS (long unbroken speech).
+    const FLUSH_SECS: u64 = 8;
+    let mut last_sent_at = std::time::Instant::now();
+    let mut last_phrase_sent = String::new();
+
+    let app_for_partial = app_handle.clone();
     let result = recognizer::run(
         ja_path.to_str().unwrap_or(""),
         rx,
-        move |result| {
+        move |ev| {
             use recognizer::RecognitionResult::*;
-            match result {
-                // Partials stream live as Japanese — same real-time feel as English mode
+            match ev {
                 Partial(text) => {
-                    let _ = app_for_result.emit("transcription", TranscriptionEvent {
-                        text,
+                    let _ = app_for_partial.emit("transcription", TranscriptionEvent {
+                        text: text.clone(),
+                        current: String::new(),
                         kind: "partial".into(),
                     });
-                }
-                // Finals are translated to English; this blocks ~200-500ms but the
-                // next sentence is already being spoken, so the delay is imperceptible
-                Final(text) => {
-                    let english = translate_ja_en(&text);
-                    if !english.is_empty() {
-                        let _ = app_for_result.emit("transcription", TranscriptionEvent {
-                            text: english,
-                            kind: "final".into(),
-                        });
+
+                    if !text.is_empty()
+                        && last_sent_at.elapsed().as_secs() >= FLUSH_SECS
+                        && text != last_phrase_sent
+                    {
+                        let _ = tx_phrase.send(text.clone());
+                        last_phrase_sent = text;
+                        last_sent_at = std::time::Instant::now();
                     }
                 }
-                Silent => {}
+                Final(text) => {
+                    last_sent_at = std::time::Instant::now();
+                    // Skip if we just flushed the exact same partial a moment ago
+                    if !text.is_empty() && text != last_phrase_sent {
+                        last_phrase_sent = text.clone();
+                        let _ = tx_phrase.send(text);
+                    }
+                }
+                Silent => {
+                    last_sent_at = std::time::Instant::now();
+                }
             }
         },
     );
@@ -235,13 +322,10 @@ fn run_whisper_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
     let rx = audio::start_capture(stop_flag.clone());
     let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
 
-    // Accumulate 6 seconds of audio before each Whisper inference pass.
-    // 6s gives enough lyric content per window without too much latency.
     const WINDOW_SAMPLES: usize = 6 * audio::SAMPLE_RATE as usize;
     let mut buffer: Vec<f32> = Vec::with_capacity(WINDOW_SAMPLES);
 
     for chunk in rx {
-        // Convert S16LE i16 samples → f32 in [-1.0, 1.0] for Whisper
         for sample in &chunk {
             buffer.push(*sample as f32 / 32768.0);
         }
@@ -253,6 +337,7 @@ fn run_whisper_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
                 Ok(text) if !text.is_empty() => {
                     let _ = app_handle.emit("transcription", TranscriptionEvent {
                         text,
+                        current: String::new(),
                         kind: "final".into(),
                     });
                 }
