@@ -104,7 +104,7 @@ fn spawn_translate_server() -> Result<
         .arg(&script)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
         .map_err(|e| format!("Failed to spawn translate_server.py: {}", e))?;
 
@@ -219,46 +219,82 @@ fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
     let rx = audio::start_capture(stop_flag.clone());
     let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
 
-    let (tx_phrase, rx_phrase) = std::sync::mpsc::channel::<String>();
+    // tx_phrase sends raw audio chunks (Vec<i16>) to the Whisper translate thread.
+    let (tx_phrase, rx_phrase) = std::sync::mpsc::channel::<Vec<i16>>();
     let app_for_translate = app_handle.clone();
 
-    // Translation thread owns the subprocess pipes and emits English finals
-    // directly as soon as each translation completes — no polling needed.
+    // Audio accumulator: filled by the forwarding thread, drained on each Vosk Final.
+    let audio_acc: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
+    let audio_acc_fwd = audio_acc.clone();
+    let audio_acc_cb  = audio_acc.clone();
+
+    // Forwarding thread: tees the single-consumer audio channel into
+    //   (a) the Vosk recognizer channel  (b) the shared accumulator
+    let (tx_to_vosk, rx_to_vosk) = std::sync::mpsc::channel::<Vec<i16>>();
+    std::thread::spawn(move || {
+        for chunk in rx {
+            audio_acc_fwd.lock().unwrap().extend_from_slice(&chunk);
+            let _ = tx_to_vosk.send(chunk);
+        }
+    });
+
+    // Translation thread: receives audio Vec<i16>, sends binary to Faster Whisper
+    // over stdin, reads streaming text back, emits events.
     std::thread::spawn(move || {
         let mut stdout = rx_stdout;
-        while let Ok(phrase) = rx_phrase.recv() {
-            // If requests piled up while we were translating, only do the latest
-            let latest = std::iter::once(phrase)
+        'outer: while let Ok(audio) = rx_phrase.recv() {
+            // Drain stale — only translate the most recent chunk
+            let latest: Vec<i16> = std::iter::once(audio)
                 .chain(rx_phrase.try_iter())
                 .last()
                 .unwrap();
 
-            if writeln!(tx_stdin, "{}", latest).is_err() { break; }
+            // Write binary: 4-byte LE length then raw i16 samples
+            let bytes: Vec<u8> = latest.iter()
+                .flat_map(|&s| s.to_le_bytes())
+                .collect();
+            let n_bytes = bytes.len() as u32;
+            if tx_stdin.write_all(&n_bytes.to_le_bytes()).is_err() { break; }
+            if tx_stdin.write_all(&bytes).is_err() { break; }
             if tx_stdin.flush().is_err() { break; }
 
-            let mut english = String::new();
-            if stdout.read_line(&mut english).is_err() { break; }
-            let english = english.trim().to_string();
+            // Read streaming text lines until "---" done marker
+            let mut last_text = String::new();
+            loop {
+                let mut line = String::new();
+                if stdout.read_line(&mut line).is_err() { break 'outer; }
+                let line = line.trim().to_string();
 
-            if !english.is_empty() {
-                let _ = app_for_translate.emit("transcription", TranscriptionEvent {
-                    text: english,
-                    current: String::new(),
-                    kind: "final".into(),
-                });
+                if line == "---" {
+                    if !last_text.is_empty() {
+                        let _ = app_for_translate.emit("transcription", TranscriptionEvent {
+                            text: last_text,
+                            current: String::new(),
+                            kind: "final".into(),
+                        });
+                    }
+                    break;
+                } else if !line.is_empty() {
+                    last_text = line.clone();
+                    let _ = app_for_translate.emit("transcription", TranscriptionEvent {
+                        text: line,
+                        current: String::new(),
+                        kind: "streaming-en".into(),
+                    });
+                }
             }
         }
     });
 
-    // Force-translate if no sentence boundary for FLUSH_SECS (long unbroken speech).
+    // Force-flush accumulated audio if no sentence boundary for FLUSH_SECS.
     const FLUSH_SECS: u64 = 8;
+    const MIN_SAMPLES: usize = 8_000; // 0.5 s at 16 kHz — skip misfires
     let mut last_sent_at = std::time::Instant::now();
-    let mut last_phrase_sent = String::new();
 
     let app_for_partial = app_handle.clone();
     let result = recognizer::run(
         ja_path.to_str().unwrap_or(""),
-        rx,
+        rx_to_vosk,
         move |ev| {
             use recognizer::RecognitionResult::*;
             match ev {
@@ -268,22 +304,21 @@ fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
                         current: String::new(),
                         kind: "partial".into(),
                     });
-
-                    if !text.is_empty()
-                        && last_sent_at.elapsed().as_secs() >= FLUSH_SECS
-                        && text != last_phrase_sent
-                    {
-                        let _ = tx_phrase.send(text.clone());
-                        last_phrase_sent = text;
-                        last_sent_at = std::time::Instant::now();
+                    // 8-second flush: drain audio and translate
+                    if !text.is_empty() && last_sent_at.elapsed().as_secs() >= FLUSH_SECS {
+                        let audio = std::mem::take(&mut *audio_acc_cb.lock().unwrap());
+                        if audio.len() >= MIN_SAMPLES {
+                            let _ = tx_phrase.send(audio);
+                            last_sent_at = std::time::Instant::now();
+                        }
                     }
                 }
-                Final(text) => {
+                Final(_) => {
                     last_sent_at = std::time::Instant::now();
-                    // Skip if we just flushed the exact same partial a moment ago
-                    if !text.is_empty() && text != last_phrase_sent {
-                        last_phrase_sent = text.clone();
-                        let _ = tx_phrase.send(text);
+                    // Drain accumulated audio and send to Faster Whisper
+                    let audio = std::mem::take(&mut *audio_acc_cb.lock().unwrap());
+                    if audio.len() >= MIN_SAMPLES {
+                        let _ = tx_phrase.send(audio);
                     }
                 }
                 Silent => {

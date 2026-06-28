@@ -18,6 +18,7 @@ export default function App() {
   const [isPartial, setIsPartial]   = useState(false);
   // JA drama mode state
   const [translationHistory, setTranslationHistory] = useState([]);
+  const [pendingEnglish, setPendingEnglish]         = useState("");
   const [japaneseStream, setJapaneseStream]         = useState("");
   const historyEndRef = useRef(null);
 
@@ -52,12 +53,16 @@ export default function App() {
           // ── JA drama mode ──────────────────────────────────────────────
           if (kind === "partial") {
             setJapaneseStream(text);
+          } else if (kind === "streaming-en") {
+            setPendingEnglish(text);
           } else {
+            // "final" — promote pending to confirmed history
             setTranslationHistory((h) => {
               // Skip if identical to the last entry (flush + Final race)
               if (h.length > 0 && h[h.length - 1] === text) return h;
               return [...h, text];
             });
+            setPendingEnglish("");
             setJapaneseStream("");
           }
         } else {
@@ -105,11 +110,13 @@ export default function App() {
       setWords([]);
       setCurrentJa("");
       setTranslationHistory([]);
+      setPendingEnglish("");
       setJapaneseStream("");
     } else {
       setWords([]);
       setCurrentJa("");
       setTranslationHistory([]);
+      setPendingEnglish("");
       setJapaneseStream("");
       setRunning(true);
       await invoke("start_listening", { mode });
@@ -211,6 +218,9 @@ export default function App() {
             )}
             <div ref={historyEndRef} />
           </div>
+          {pendingEnglish && (
+            <div className="ja-pending">{pendingEnglish}</div>
+          )}
           {japaneseStream && (
             <div className="ja-japanese">{japaneseStream}</div>
           )}

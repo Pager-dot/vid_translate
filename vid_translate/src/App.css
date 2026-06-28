@@ -225,6 +225,17 @@ body,
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
 }
 
+.ja-pending {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: clamp(16px, 2.4vw, 34px);
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.55);
+  text-align: center;
+  width: 100%;
+  font-style: italic;
+  line-height: 1.3;
+}
+
 .ja-japanese {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: clamp(10px, 1.2vw, 15px);
