@@ -24,7 +24,6 @@ export default function App() {
 
   const [status, setStatus]         = useState("idle");
   const [modelPath, setModelPath]   = useState("");
-  const [whisperModelPath, setWhisperModelPath] = useState("");
   const [voskJaModelPath, setVoskJaModelPath]   = useState("");
   const [running, setRunning]       = useState(false);
   const [mode, setMode]             = useState("vosk");
@@ -42,7 +41,6 @@ export default function App() {
 
   useEffect(() => {
     invoke("get_model_path").then(setModelPath);
-    invoke("get_whisper_model_path").then(setWhisperModelPath);
     invoke("get_vosk_ja_model_path").then(setVoskJaModelPath);
 
     const setupListeners = async () => {
@@ -138,22 +136,6 @@ export default function App() {
             https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
             -o /tmp/vosk.zip && unzip /tmp/vosk.zip -d /tmp && mv
             /tmp/vosk-model-small-en-us-0.15 {modelPath}
-          </code>
-        </span>
-        <button className="btn" onClick={toggle}>Retry</button>
-      </div>
-    );
-  }
-
-  if (status === "whisper_model_missing") {
-    return (
-      <div className="bar bar--setup" data-tauri-drag-region>
-        <span className="setup-text">
-          Whisper model not found. Run:
-          <code>
-            mkdir -p ~/.local/share/vid_translate/models && curl -L
-            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
-            -o {whisperModelPath}
           </code>
         </span>
         <button className="btn" onClick={toggle}>Retry</button>

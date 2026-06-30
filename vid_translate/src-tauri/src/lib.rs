@@ -1,6 +1,5 @@
 mod audio;
 mod recognizer;
-mod transcriber;
 
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
@@ -53,14 +52,6 @@ fn vosk_ja_model_path() -> std::path::PathBuf {
         .join("vosk-model-ja")
 }
 
-fn whisper_model_path() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("vid_translate")
-        .join("models")
-        .join("ggml-base.bin")
-}
-
 #[tauri::command]
 fn get_model_path() -> String {
     vosk_model_path().to_string_lossy().to_string()
@@ -69,11 +60,6 @@ fn get_model_path() -> String {
 #[tauri::command]
 fn get_vosk_ja_model_path() -> String {
     vosk_ja_model_path().to_string_lossy().to_string()
-}
-
-#[tauri::command]
-fn get_whisper_model_path() -> String {
-    whisper_model_path().to_string_lossy().to_string()
 }
 
 fn translate_server_path() -> std::path::PathBuf {
@@ -145,7 +131,6 @@ fn start_listening(
     let handle = std::thread::spawn(move || {
         match mode.as_str() {
             "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag),
-            "whisper" => run_whisper_pipeline(app_handle, stop_flag),
             _ => run_vosk_pipeline(app_handle, stop_flag),
         }
     });
@@ -198,6 +183,15 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
     }
 }
 
+fn is_japanese_text(text: &str) -> bool {
+    text.chars().any(|c| {
+        ('\u{3040}'..='\u{309F}').contains(&c) || // hiragana
+        ('\u{30A0}'..='\u{30FF}').contains(&c) || // katakana
+        ('\u{4E00}'..='\u{9FFF}').contains(&c) || // CJK unified
+        ('\u{3400}'..='\u{4DBF}').contains(&c)    // CJK extension A
+    })
+}
+
 fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
     let ja_path = vosk_ja_model_path();
     if !ja_path.exists() {
@@ -207,7 +201,7 @@ fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
 
     let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
 
-    let (mut tx_stdin, rx_stdout) = match spawn_translate_server() {
+    let (tx_stdin, rx_stdout) = match spawn_translate_server() {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("[translate] {}", e);
@@ -216,55 +210,24 @@ fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
         }
     };
 
+    // Wrap stdin in Mutex so the Vosk callback (sync) can write to it
+    let tx_stdin = Arc::new(Mutex::new(tx_stdin));
+    let tx_stdin_cb = tx_stdin.clone();
+
     let rx = audio::start_capture(stop_flag.clone());
     let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
 
-    // tx_phrase sends raw audio chunks (Vec<i16>) to the Whisper translate thread.
-    let (tx_phrase, rx_phrase) = std::sync::mpsc::channel::<Vec<i16>>();
     let app_for_translate = app_handle.clone();
 
-    // Audio accumulator: filled by the forwarding thread, drained on each Vosk Final.
-    let audio_acc: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
-    let audio_acc_fwd = audio_acc.clone();
-    let audio_acc_cb  = audio_acc.clone();
-
-    // Forwarding thread: tees the single-consumer audio channel into
-    //   (a) the Vosk recognizer channel  (b) the shared accumulator
-    let (tx_to_vosk, rx_to_vosk) = std::sync::mpsc::channel::<Vec<i16>>();
-    std::thread::spawn(move || {
-        for chunk in rx {
-            audio_acc_fwd.lock().unwrap().extend_from_slice(&chunk);
-            let _ = tx_to_vosk.send(chunk);
-        }
-    });
-
-    // Translation thread: receives audio Vec<i16>, sends binary to Faster Whisper
-    // over stdin, reads streaming text back, emits events.
+    // Reader thread: receives translated lines from MarianMT server, emits events
     std::thread::spawn(move || {
         let mut stdout = rx_stdout;
-        'outer: while let Ok(audio) = rx_phrase.recv() {
-            // Drain stale — only translate the most recent chunk
-            let latest: Vec<i16> = std::iter::once(audio)
-                .chain(rx_phrase.try_iter())
-                .last()
-                .unwrap();
-
-            // Write binary: 4-byte LE length then raw i16 samples
-            let bytes: Vec<u8> = latest.iter()
-                .flat_map(|&s| s.to_le_bytes())
-                .collect();
-            let n_bytes = bytes.len() as u32;
-            if tx_stdin.write_all(&n_bytes.to_le_bytes()).is_err() { break; }
-            if tx_stdin.write_all(&bytes).is_err() { break; }
-            if tx_stdin.flush().is_err() { break; }
-
-            // Read streaming text lines until "---" done marker
+        loop {
             let mut last_text = String::new();
             loop {
                 let mut line = String::new();
-                if stdout.read_line(&mut line).is_err() { break 'outer; }
+                if stdout.read_line(&mut line).unwrap_or(0) == 0 { return; }
                 let line = line.trim().to_string();
-
                 if line == "---" {
                     if !last_text.is_empty() {
                         let _ = app_for_translate.emit("transcription", TranscriptionEvent {
@@ -286,44 +249,39 @@ fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
         }
     });
 
-    // Force-flush accumulated audio if no sentence boundary for FLUSH_SECS.
-    const FLUSH_SECS: u64 = 8;
-    const MIN_SAMPLES: usize = 8_000; // 0.5 s at 16 kHz — skip misfires
-    let mut last_sent_at = std::time::Instant::now();
-
     let app_for_partial = app_handle.clone();
     let result = recognizer::run(
         ja_path.to_str().unwrap_or(""),
-        rx_to_vosk,
+        rx,
         move |ev| {
             use recognizer::RecognitionResult::*;
             match ev {
                 Partial(text) => {
                     let _ = app_for_partial.emit("transcription", TranscriptionEvent {
-                        text: text.clone(),
+                        text,
                         current: String::new(),
                         kind: "partial".into(),
                     });
-                    // 8-second flush: drain audio and translate
-                    if !text.is_empty() && last_sent_at.elapsed().as_secs() >= FLUSH_SECS {
-                        let audio = std::mem::take(&mut *audio_acc_cb.lock().unwrap());
-                        if audio.len() >= MIN_SAMPLES {
-                            let _ = tx_phrase.send(audio);
-                            last_sent_at = std::time::Instant::now();
-                        }
+                }
+                Final(text) if !text.is_empty() => {
+                    if is_japanese_text(&text) {
+                        eprintln!("[vosk→rust] sending: {:?}", text);
+                        let payload = serde_json::json!({"text": text});
+                        let mut msg = serde_json::to_string(&payload).unwrap();
+                        msg.push('\n');
+                        let mut stdin = tx_stdin_cb.lock().unwrap();
+                        let _ = stdin.write_all(msg.as_bytes());
+                        let _ = stdin.flush();
+                    } else {
+                        eprintln!("[vosk→rust] english passthrough: {:?}", text);
+                        let _ = app_for_partial.emit("transcription", TranscriptionEvent {
+                            text,
+                            current: String::new(),
+                            kind: "final".into(),
+                        });
                     }
                 }
-                Final(_) => {
-                    last_sent_at = std::time::Instant::now();
-                    // Drain accumulated audio and send to Faster Whisper
-                    let audio = std::mem::take(&mut *audio_acc_cb.lock().unwrap());
-                    if audio.len() >= MIN_SAMPLES {
-                        let _ = tx_phrase.send(audio);
-                    }
-                }
-                Silent => {
-                    last_sent_at = std::time::Instant::now();
-                }
+                _ => {}
             }
         },
     );
@@ -334,58 +292,6 @@ fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
     } else {
         let _ = app_handle.emit("status", StatusEvent { state: "idle".into() });
     }
-}
-
-fn run_whisper_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
-    let model_path = whisper_model_path();
-    if !model_path.exists() {
-        let _ = app_handle.emit("status", StatusEvent { state: "whisper_model_missing".into() });
-        return;
-    }
-
-    let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
-
-    let transcriber = match transcriber::Transcriber::new(model_path.to_str().unwrap_or("")) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("[lib] Whisper load error: {}", e);
-            let _ = app_handle.emit("status", StatusEvent { state: "error".into() });
-            return;
-        }
-    };
-
-    let rx = audio::start_capture(stop_flag.clone());
-    let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
-
-    const WINDOW_SAMPLES: usize = 6 * audio::SAMPLE_RATE as usize;
-    let mut buffer: Vec<f32> = Vec::with_capacity(WINDOW_SAMPLES);
-
-    for chunk in rx {
-        for sample in &chunk {
-            buffer.push(*sample as f32 / 32768.0);
-        }
-
-        if buffer.len() >= WINDOW_SAMPLES {
-            let _ = app_handle.emit("status", StatusEvent { state: "processing".into() });
-
-            match transcriber.transcribe(&buffer, "ja") {
-                Ok(text) if !text.is_empty() => {
-                    let _ = app_handle.emit("transcription", TranscriptionEvent {
-                        text,
-                        current: String::new(),
-                        kind: "final".into(),
-                    });
-                }
-                Err(e) => eprintln!("[whisper] transcribe error: {}", e),
-                _ => {}
-            }
-
-            buffer.clear();
-            let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
-        }
-    }
-
-    let _ = app_handle.emit("status", StatusEvent { state: "idle".into() });
 }
 
 #[tauri::command]
@@ -404,7 +310,6 @@ pub fn run() {
             stop_listening,
             get_model_path,
             get_vosk_ja_model_path,
-            get_whisper_model_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
