@@ -71,7 +71,10 @@ fn translate_server_path() -> std::path::PathBuf {
 
 /// Spawns the argostranslate Python server and returns (stdin_writer, stdout_reader).
 /// The server stays alive for the lifetime of the pipeline — no per-call startup cost.
-fn spawn_translate_server() -> Result<
+fn spawn_translate_server(
+    ollama_key: Option<String>,
+    ollama_model: Option<String>,
+) -> Result<
     (
         std::io::BufWriter<std::process::ChildStdin>,
         BufReader<std::process::ChildStdout>,
@@ -86,11 +89,20 @@ fn spawn_translate_server() -> Result<
         ));
     }
 
-    let mut child = std::process::Command::new("python3")
-        .arg(&script)
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(&script)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+
+    if let Some(key) = ollama_key.filter(|k| !k.is_empty()) {
+        cmd.env("OLLAMA_KEY", key);
+    }
+    if let Some(model) = ollama_model.filter(|m| !m.is_empty()) {
+        cmd.env("OLLAMA_MODEL", model);
+    }
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn translate_server.py: {}", e))?;
 
@@ -114,6 +126,8 @@ fn start_listening(
     state: tauri::State<Mutex<PipelineState>>,
     app: tauri::AppHandle,
     mode: Option<String>,
+    ollama_key: Option<String>,
+    ollama_model: Option<String>,
 ) {
     let mut pipeline = state.lock().unwrap();
 
@@ -130,7 +144,7 @@ fn start_listening(
 
     let handle = std::thread::spawn(move || {
         match mode.as_str() {
-            "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag),
+            "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag, ollama_key, ollama_model),
             _ => run_vosk_pipeline(app_handle, stop_flag),
         }
     });
@@ -192,7 +206,12 @@ fn is_japanese_text(text: &str) -> bool {
     })
 }
 
-fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
+fn run_vosk_ja_pipeline(
+    app_handle: tauri::AppHandle,
+    stop_flag: Arc<AtomicBool>,
+    ollama_key: Option<String>,
+    ollama_model: Option<String>,
+) {
     let ja_path = vosk_ja_model_path();
     if !ja_path.exists() {
         let _ = app_handle.emit("status", StatusEvent { state: "vosk_ja_model_missing".into() });
@@ -201,7 +220,7 @@ fn run_vosk_ja_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>
 
     let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
 
-    let (tx_stdin, rx_stdout) = match spawn_translate_server() {
+    let (tx_stdin, rx_stdout) = match spawn_translate_server(ollama_key, ollama_model) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("[translate] {}", e);
@@ -300,6 +319,66 @@ fn stop_listening(state: tauri::State<Mutex<PipelineState>>) {
     pipeline.stop_flag.store(true, Ordering::Relaxed);
 }
 
+#[derive(Serialize, Clone)]
+struct PullProgressEvent {
+    status: String,
+    completed: Option<u64>,
+    total: Option<u64>,
+}
+
+/// Calls local Ollama pull API and streams progress as "pull_progress" events.
+/// Model name is passed as sys.argv[1] to avoid shell injection.
+#[tauri::command]
+fn pull_model(app: tauri::AppHandle, model: String) {
+    std::thread::spawn(move || {
+        let python_code = r#"
+import urllib.request, json, sys
+model = sys.argv[1]
+url = "http://localhost:11434/api/pull"
+payload = json.dumps({"model": model, "stream": True}).encode()
+req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=600) as r:
+        for line in r:
+            line = line.strip()
+            if line:
+                print(line.decode(), flush=True)
+except Exception as e:
+    print(json.dumps({"status": "error", "error": str(e)}), flush=True)
+"#;
+        let mut child = match std::process::Command::new("python3")
+            .arg("-c").arg(python_code)
+            .arg(&model)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[pull] spawn failed: {}", e);
+                return;
+            }
+        };
+
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                        let event = PullProgressEvent {
+                            status: val.get("status").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                            completed: val.get("completed").and_then(|v| v.as_u64()),
+                            total: val.get("total").and_then(|v| v.as_u64()),
+                        };
+                        let _ = app.emit("pull_progress", &event);
+                    }
+                }
+            }
+        }
+        child.wait().ok();
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -310,6 +389,7 @@ pub fn run() {
             stop_listening,
             get_model_path,
             get_vosk_ja_model_path,
+            pull_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

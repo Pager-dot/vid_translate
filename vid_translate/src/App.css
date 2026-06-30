@@ -21,11 +21,12 @@ body,
   width: 100%;
   height: 90px;
   padding: 0 16px;
-  background: rgba(0, 0, 0, 0.78);
+  background: rgba(0, 0, 0, var(--bg-opacity, 0.78));
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(8px);
   border-radius: 10px;
   cursor: move;
+  position: relative;
 }
 
 .bar--setup {
@@ -119,18 +120,22 @@ body,
 }
 
 .transcript {
-  flex: 1;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
   cursor: move;
+  pointer-events: none;
 }
 
 .caption {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  /* Scales with window width: fits ~10 words at any size */
-  font-size: clamp(14px, 2.2vw, 32px);
+  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: calc(clamp(14px, 2.2vw, 32px) * var(--font-scale, 1));
   font-weight: 500;
   line-height: 1.3;
   white-space: nowrap;
@@ -172,10 +177,37 @@ body,
   align-items: flex-start;
   height: auto;
   min-height: 160px;
-  padding: 8px 16px 14px;
-  gap: 6px;
+  padding: 10px 16px 14px;
+  gap: 8px;
 }
 
+/* shared top bar row — used in both EN and JA modes */
+.bar-top {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+  z-index: 1;
+}
+
+.bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+  /* sit above the absolutely-positioned transcript */
+  position: relative;
+  z-index: 1;
+}
+
+/* legacy alias kept for any old references */
 .ja-controls {
   display: flex;
   align-items: center;
@@ -209,8 +241,8 @@ body,
 .ja-history::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.15); border-radius: 2px; }
 
 .ja-history-item {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: clamp(13px, 1.8vw, 24px);
+  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: calc(clamp(13px, 1.8vw, 24px) * var(--font-scale, 1));
   font-weight: 400;
   color: rgba(255, 255, 255, 0.35);
   text-align: center;
@@ -219,15 +251,15 @@ body,
 }
 
 .ja-history-item--latest {
-  font-size: clamp(16px, 2.4vw, 34px);
+  font-size: calc(clamp(16px, 2.4vw, 34px) * var(--font-scale, 1));
   font-weight: 700;
   color: #ffffff;
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
 }
 
 .ja-pending {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: clamp(16px, 2.4vw, 34px);
+  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: calc(clamp(16px, 2.4vw, 34px) * var(--font-scale, 1));
   font-weight: 700;
   color: rgba(255, 255, 255, 0.55);
   text-align: center;
@@ -262,3 +294,207 @@ body,
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ── Settings + Close action buttons ──────────────────── */
+.btn--settings,
+.btn--close {
+  width: 40px;
+  height: 40px;
+  font-size: 18px;
+  border-radius: 10px;
+}
+
+.btn--settings {
+  color: rgba(255, 255, 255, 0.65);
+}
+.btn--settings:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.btn--close {
+  color: rgba(255, 255, 255, 0.5);
+}
+.btn--close:hover {
+  color: #fff;
+  background: rgba(220, 50, 50, 0.35);
+  border-color: rgba(220, 50, 50, 0.5);
+}
+
+/* ── Settings window ───────────────────────────────────── */
+.settings-window {
+  width: 100%;
+  height: 100%;
+  background: rgba(12, 12, 14, 0.97);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  /* Force browser form controls (select, input) to use dark variants */
+  color-scheme: dark;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  flex-shrink: 0;
+  cursor: move;
+}
+
+.settings-title {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.settings-form {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+.settings-section {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.28);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-top: 10px;
+  margin-bottom: 1px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-row label {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  width: 78px;
+  flex-shrink: 0;
+}
+
+.settings-input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 11px;
+  padding: 4px 8px;
+  outline: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.settings-input:focus {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.09);
+}
+.settings-input::placeholder {
+  color: rgba(255, 255, 255, 0.2);
+}
+.settings-input--num {
+  width: 70px;
+  flex: none;
+}
+
+.settings-hint {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.25);
+  margin-left: 86px;
+  margin-top: -1px;
+}
+
+.settings-val {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+  width: 34px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.settings-unit {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.settings-footer {
+  padding: 8px 14px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.btn--save {
+  width: auto;
+  padding: 0 22px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.5);
+  color: rgba(180, 182, 255, 0.9);
+}
+.btn--save:hover {
+  background: rgba(99, 102, 241, 0.45);
+}
+
+/* ── Pull model ────────────────────────────────────────── */
+.btn--pull {
+  width: auto;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.pull-status {
+  margin-left: 86px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pull-bar-track {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.pull-bar-fill {
+  height: 100%;
+  background: #4ade80;
+  border-radius: 2px;
+  transition: width 0.25s;
+}
+
+.pull-msg {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.35);
+}
+.pull-msg--done  { color: #4ade80; }
+.pull-msg--error { color: #f87171; }
