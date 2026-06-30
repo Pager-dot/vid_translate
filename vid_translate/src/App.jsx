@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 import "./App.css";
 
 const FINAL_LINGER_MS = 2500;
@@ -38,6 +39,20 @@ export default function App() {
   // Ref so the event listener always sees the current mode without re-registering
   const modeRef = useRef(mode);
   useEffect(() => { modeRef.current = mode; }, [mode]);
+
+  // Auto-resize window when switching modes (skip initial mount)
+  const isMountedRef = useRef(false);
+  useEffect(() => {
+    if (!isMountedRef.current) { isMountedRef.current = true; return; }
+    const win = getCurrentWindow();
+    if (mode === "vosk-ja") {
+      win.setSize(new LogicalSize(1200, 500));
+      win.setPosition(new LogicalPosition(0, 500));
+    } else {
+      win.setSize(new LogicalSize(1200, 90));
+      win.setPosition(new LogicalPosition(0, 950));
+    }
+  }, [mode]);
 
   useEffect(() => {
     invoke("get_model_path").then(setModelPath);
