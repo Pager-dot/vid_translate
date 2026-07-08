@@ -31,29 +31,27 @@ impl Transcriber {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
-        // Lower the no-speech threshold so vocals in music aren't silently skipped.
-        // Default is 0.6; 0.3 keeps Whisper attentive to singing.
+        // Lower the no-speech threshold so quiet speech isn't silently skipped.
+        // Default is 0.6; 0.3 keeps Whisper attentive to soft speakers.
         params.set_no_speech_thold(0.3);
-        // Hint to the model that the audio is likely song lyrics.
-        params.set_initial_prompt("Song lyrics:");
 
         state
             .full(params, audio)
             .map_err(|e| format!("Inference error: {:?}", e))?;
 
-        let n = state
-            .full_n_segments()
-            .map_err(|e| format!("Segment count error: {:?}", e))?;
+        let n = state.full_n_segments();
 
         let mut text = String::new();
         for i in 0..n {
-            if let Ok(seg) = state.full_get_segment_text(i) {
-                let trimmed = seg.trim().to_string();
-                if !trimmed.is_empty() {
-                    if !text.is_empty() {
-                        text.push(' ');
+            if let Some(seg) = state.get_segment(i) {
+                if let Ok(seg_text) = seg.to_str() {
+                    let trimmed = seg_text.trim();
+                    if !trimmed.is_empty() {
+                        if !text.is_empty() {
+                            text.push(' ');
+                        }
+                        text.push_str(trimmed);
                     }
-                    text.push_str(&trimmed);
                 }
             }
         }

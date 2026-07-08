@@ -225,7 +225,7 @@ function SettingsPanel({ draft, setDraft, onSave, onClose }) {
         </div>
 
         <div className="settings-row">
-          <label>JA Height</label>
+          <label>JA/ES Height</label>
           <input
             type="number" className="settings-input settings-input--num"
             value={draft.jaHeight} min={160} max={1200}
@@ -254,6 +254,7 @@ export default function App() {
   const [status, setStatus]               = useState("idle");
   const [modelPath, setModelPath]         = useState("");
   const [voskJaModelPath, setVoskJaModelPath] = useState("");
+  const [voskEsModelPath, setVoskEsModelPath] = useState("");
   const [running, setRunning]             = useState(false);
   const [mode, setMode]                   = useState("vosk");
   const [settingsOpen, setSettingsOpen]   = useState(false);
@@ -281,7 +282,7 @@ export default function App() {
     if (!hasMountedRef.current) { hasMountedRef.current = true; return; }
     if (settingsOpen) return; // settings panel manages its own size
     const win = getCurrentWindow();
-    if (mode === "vosk-ja") {
+    if (mode === "vosk-ja" || mode === "vosk-es") {
       win.setSize(new LogicalSize(settings.width, settings.jaHeight));
       win.setPosition(new LogicalPosition(0, Math.max(0, 950 - (settings.jaHeight - settings.enHeight))));
     } else {
@@ -293,12 +294,13 @@ export default function App() {
   useEffect(() => {
     invoke("get_model_path").then(setModelPath);
     invoke("get_vosk_ja_model_path").then(setVoskJaModelPath);
+    invoke("get_vosk_es_model_path").then(setVoskEsModelPath);
 
     const setupListeners = async () => {
       const unlistenTx = await listen("transcription", (event) => {
         const { text, current, type: kind } = event.payload;
 
-        if (modeRef.current === "vosk-ja") {
+        if (modeRef.current === "vosk-ja" || modeRef.current === "vosk-es") {
           if (kind === "partial") {
             setJapaneseStream(text);
           } else if (kind === "streaming-en") {
@@ -332,7 +334,7 @@ export default function App() {
 
       const unlistenStatus = await listen("status", (event) => {
         setStatus(event.payload.state);
-        if (["model_missing", "whisper_model_missing", "vosk_ja_model_missing"]
+        if (["model_missing", "vosk_ja_model_missing", "vosk_es_model_missing"]
             .includes(event.payload.state)) {
           setRunning(false);
         }
@@ -372,8 +374,11 @@ export default function App() {
     }
   };
 
+  const MODES = ["vosk", "vosk-ja", "vosk-es"];
   const toggleMode = () => {
-    if (!running) setMode((m) => (m === "vosk" ? "vosk-ja" : "vosk"));
+    if (!running) {
+      setMode((m) => MODES[(MODES.indexOf(m) + 1) % MODES.length]);
+    }
   };
 
   const openSettings = async () => {
@@ -389,7 +394,7 @@ export default function App() {
   const closeSettings = async () => {
     setSettingsOpen(false);
     const win = getCurrentWindow();
-    if (mode === "vosk-ja") {
+    if (mode === "vosk-ja" || mode === "vosk-es") {
       win.setSize(new LogicalSize(settings.width, settings.jaHeight));
       win.setPosition(new LogicalPosition(0, Math.max(0, 950 - (settings.jaHeight - settings.enHeight))));
     } else {
@@ -404,7 +409,7 @@ export default function App() {
     applySettings(draft);
     setSettingsOpen(false);
     const win = getCurrentWindow();
-    if (mode === "vosk-ja") {
+    if (mode === "vosk-ja" || mode === "vosk-es") {
       win.setSize(new LogicalSize(draft.width, draft.jaHeight));
       win.setPosition(new LogicalPosition(0, Math.max(0, 950 - (draft.jaHeight - draft.enHeight))));
     } else {
@@ -461,8 +466,25 @@ export default function App() {
     );
   }
 
-  // ── JA drama mode ──────────────────────────────────────────────────────────
-  if (mode === "vosk-ja") {
+  if (status === "vosk_es_model_missing") {
+    return (
+      <div className="bar bar--setup" data-tauri-drag-region>
+        <span className="setup-text">
+          Vosk Spanish model not found. Run:
+          <code>
+            curl -L https://alphacephei.com/vosk/models/vosk-model-es-0.42.zip
+            -o /tmp/vosk-es.zip && unzip /tmp/vosk-es.zip -d /tmp && mv
+            /tmp/vosk-model-es-0.42 {voskEsModelPath}
+          </code>
+        </span>
+        <button className="btn" onClick={toggle}>Retry</button>
+      </div>
+    );
+  }
+
+  // ── JA / ES translation mode ────────────────────────────────────────────────
+  if (mode === "vosk-ja" || mode === "vosk-es") {
+    const isEs = mode === "vosk-es";
     return (
       <div className="bar bar--ja" data-tauri-drag-region>
         <div className="bar-top">
@@ -474,9 +496,9 @@ export default function App() {
               className="btn btn--mode btn--mode-active"
               onClick={toggleMode}
               disabled={running}
-              title="Switch to English mode"
+              title={isEs ? "Switch to English mode" : "Switch to Spanish→English"}
             >
-              JA
+              {isEs ? "ES" : "JA"}
             </button>
             <span className={`dot dot--${status}`} />
           </div>
