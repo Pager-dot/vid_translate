@@ -258,6 +258,7 @@ export default function App() {
   const [running, setRunning]             = useState(false);
   const [mode, setMode]                   = useState("vosk");
   const [settingsOpen, setSettingsOpen]   = useState(false);
+  const [platform, setPlatform]           = useState("linux");
 
   const [settings, setSettings] = useState(loadSettings);
   const [draft, setDraft]       = useState(settings);
@@ -295,6 +296,7 @@ export default function App() {
     invoke("get_model_path").then(setModelPath);
     invoke("get_vosk_ja_model_path").then(setVoskJaModelPath);
     invoke("get_vosk_es_model_path").then(setVoskEsModelPath);
+    invoke("get_platform").then(setPlatform);
 
     const setupListeners = async () => {
       const unlistenTx = await listen("transcription", (event) => {
@@ -433,17 +435,17 @@ export default function App() {
   }
 
   // ── Setup screens ──────────────────────────────────────────────────────────
+  const isWindows = platform === "windows";
+
   if (status === "model_missing") {
+    const cmd = isWindows
+      ? `New-Item -ItemType Directory -Force -Path (Split-Path "${modelPath}") | Out-Null; Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -OutFile "$env:TEMP\\vosk.zip"; Expand-Archive "$env:TEMP\\vosk.zip" -DestinationPath "$env:TEMP" -Force; Move-Item "$env:TEMP\\vosk-model-small-en-us-0.15" "${modelPath}" -Force`
+      : `mkdir -p ${modelPath} && curl -L https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -o /tmp/vosk.zip && unzip /tmp/vosk.zip -d /tmp && mv /tmp/vosk-model-small-en-us-0.15 ${modelPath}`;
     return (
       <div className="bar bar--setup" data-tauri-drag-region>
         <span className="setup-text">
           Vosk model not found. Run:
-          <code>
-            mkdir -p {modelPath} && curl -L
-            https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
-            -o /tmp/vosk.zip && unzip /tmp/vosk.zip -d /tmp && mv
-            /tmp/vosk-model-small-en-us-0.15 {modelPath}
-          </code>
+          <code>{cmd}</code>
         </span>
         <button className="btn" onClick={toggle}>Retry</button>
       </div>
@@ -451,15 +453,14 @@ export default function App() {
   }
 
   if (status === "vosk_ja_model_missing") {
+    const cmd = isWindows
+      ? `New-Item -ItemType Directory -Force -Path (Split-Path "${voskJaModelPath}") | Out-Null; Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-ja-0.22.zip -OutFile "$env:TEMP\\vosk-ja.zip"; Expand-Archive "$env:TEMP\\vosk-ja.zip" -DestinationPath "$env:TEMP" -Force; Move-Item "$env:TEMP\\vosk-model-ja-0.22" "${voskJaModelPath}" -Force`
+      : `curl -L https://alphacephei.com/vosk/models/vosk-model-ja-0.22.zip -o /tmp/vosk-ja.zip && unzip /tmp/vosk-ja.zip -d /tmp && mv /tmp/vosk-model-ja-0.22 ${voskJaModelPath}`;
     return (
       <div className="bar bar--setup" data-tauri-drag-region>
         <span className="setup-text">
           Vosk Japanese model not found. Run:
-          <code>
-            curl -L https://alphacephei.com/vosk/models/vosk-model-ja-0.22.zip
-            -o /tmp/vosk-ja.zip && unzip /tmp/vosk-ja.zip -d /tmp && mv
-            /tmp/vosk-model-ja-0.22 {voskJaModelPath}
-          </code>
+          <code>{cmd}</code>
         </span>
         <button className="btn" onClick={toggle}>Retry</button>
       </div>
@@ -467,15 +468,14 @@ export default function App() {
   }
 
   if (status === "vosk_es_model_missing") {
+    const cmd = isWindows
+      ? `New-Item -ItemType Directory -Force -Path (Split-Path "${voskEsModelPath}") | Out-Null; Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-es-0.42.zip -OutFile "$env:TEMP\\vosk-es.zip"; Expand-Archive "$env:TEMP\\vosk-es.zip" -DestinationPath "$env:TEMP" -Force; Move-Item "$env:TEMP\\vosk-model-es-0.42" "${voskEsModelPath}" -Force`
+      : `curl -L https://alphacephei.com/vosk/models/vosk-model-es-0.42.zip -o /tmp/vosk-es.zip && unzip /tmp/vosk-es.zip -d /tmp && mv /tmp/vosk-model-es-0.42 ${voskEsModelPath}`;
     return (
       <div className="bar bar--setup" data-tauri-drag-region>
         <span className="setup-text">
           Vosk Spanish model not found. Run:
-          <code>
-            curl -L https://alphacephei.com/vosk/models/vosk-model-es-0.42.zip
-            -o /tmp/vosk-es.zip && unzip /tmp/vosk-es.zip -d /tmp && mv
-            /tmp/vosk-model-es-0.42 {voskEsModelPath}
-          </code>
+          <code>{cmd}</code>
         </span>
         <button className="btn" onClick={toggle}>Retry</button>
       </div>

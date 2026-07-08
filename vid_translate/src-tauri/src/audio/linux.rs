@@ -5,7 +5,8 @@ use std::sync::{
     mpsc, Arc,
 };
 
-pub const SAMPLE_RATE: u32 = 16000;
+use super::SAMPLE_RATE;
+
 // 250ms chunks — Vosk processes these fast enough for word-by-word output
 const CHUNK_SAMPLES: usize = (SAMPLE_RATE / 4) as usize;
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * 2; // S16LE = 2 bytes/sample

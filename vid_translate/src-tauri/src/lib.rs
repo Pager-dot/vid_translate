@@ -74,6 +74,29 @@ fn get_vosk_es_model_path() -> String {
     vosk_es_model_path().to_string_lossy().to_string()
 }
 
+/// Picks whichever Python binary name is actually on PATH: "python3" on Linux/macOS,
+/// "python" on most Windows installs. Resolved once and cached.
+fn python_command() -> &'static str {
+    use std::sync::OnceLock;
+    static PYTHON_BIN: OnceLock<&'static str> = OnceLock::new();
+    *PYTHON_BIN.get_or_init(|| {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
+            "python3"
+        } else {
+            "python"
+        }
+    })
+}
+
+#[tauri::command]
+fn get_platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
 fn translate_server_path() -> std::path::PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -104,7 +127,7 @@ fn spawn_translate_server(
         ));
     }
 
-    let mut cmd = std::process::Command::new("python3");
+    let mut cmd = std::process::Command::new(python_command());
     cmd.arg(&script)
         .env("SOURCE_LANG", source_lang)
         .stdin(std::process::Stdio::piped())
@@ -460,7 +483,7 @@ try:
 except Exception as e:
     print(json.dumps({"status": "error", "error": str(e)}), flush=True)
 "#;
-        let mut child = match std::process::Command::new("python3")
+        let mut child = match std::process::Command::new(python_command())
             .arg("-c").arg(python_code)
             .arg(&model)
             .stdout(std::process::Stdio::piped())
@@ -504,6 +527,7 @@ pub fn run() {
             get_model_path,
             get_vosk_ja_model_path,
             get_vosk_es_model_path,
+            get_platform,
             pull_model,
         ])
         .run(tauri::generate_context!())
