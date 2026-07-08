@@ -39,6 +39,11 @@ function slideWindow(text) {
   return words.slice(-MAX_WORDS);
 }
 
+const TASKBAR_MARGIN = 40;
+function bottomAlignedY(height) {
+  return Math.max(0, window.screen.height - height - TASKBAR_MARGIN);
+}
+
 function SettingsPanel({ draft, setDraft, onSave, onClose }) {
   const [pullInput, setPullInput]   = useState("");
   const [pullStatus, setPullStatus] = useState("idle"); // idle | pulling | done | error
@@ -282,15 +287,29 @@ export default function App() {
   useEffect(() => {
     if (!hasMountedRef.current) { hasMountedRef.current = true; return; }
     if (settingsOpen) return; // settings panel manages its own size
+    if ((mode === "vosk-ja" || mode === "vosk-es") && running) return; // auto-fit effect takes over
     const win = getCurrentWindow();
-    if (mode === "vosk-ja" || mode === "vosk-es") {
-      win.setSize(new LogicalSize(settings.width, settings.jaHeight));
-      win.setPosition(new LogicalPosition(0, Math.max(0, 950 - (settings.jaHeight - settings.enHeight))));
-    } else {
-      win.setSize(new LogicalSize(settings.width, settings.enHeight));
-      win.setPosition(new LogicalPosition(0, 950));
-    }
-  }, [mode, settings.width, settings.jaHeight, settings.enHeight]);
+    win.setSize(new LogicalSize(settings.width, settings.enHeight));
+    win.setPosition(new LogicalPosition(0, bottomAlignedY(settings.enHeight)));
+  }, [mode, running, settings.width, settings.enHeight]);
+
+  // Auto-fit window height to actual rendered content in JA/ES mode while listening,
+  // instead of jumping straight to the max jaHeight and leaving empty transparent space.
+  const jaBarRef = useRef(null);
+  useEffect(() => {
+    if (!((mode === "vosk-ja" || mode === "vosk-es") && running) || settingsOpen) return;
+    const el = jaBarRef.current;
+    if (!el) return;
+    const win = getCurrentWindow();
+    const ro = new ResizeObserver((entries) => {
+      const contentH = Math.ceil(entries[0].contentRect.height);
+      const clamped = Math.min(settings.jaHeight, Math.max(settings.enHeight, contentH));
+      win.setSize(new LogicalSize(settings.width, clamped));
+      win.setPosition(new LogicalPosition(0, bottomAlignedY(clamped)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [mode, running, settingsOpen, settings.width, settings.enHeight, settings.jaHeight]);
 
   useEffect(() => {
     invoke("get_model_path").then(setModelPath);
@@ -396,12 +415,12 @@ export default function App() {
   const closeSettings = async () => {
     setSettingsOpen(false);
     const win = getCurrentWindow();
-    if (mode === "vosk-ja" || mode === "vosk-es") {
+    if ((mode === "vosk-ja" || mode === "vosk-es") && running) {
       win.setSize(new LogicalSize(settings.width, settings.jaHeight));
-      win.setPosition(new LogicalPosition(0, Math.max(0, 950 - (settings.jaHeight - settings.enHeight))));
+      win.setPosition(new LogicalPosition(0, bottomAlignedY(settings.jaHeight)));
     } else {
       win.setSize(new LogicalSize(settings.width, settings.enHeight));
-      win.setPosition(new LogicalPosition(0, 950));
+      win.setPosition(new LogicalPosition(0, bottomAlignedY(settings.enHeight)));
     }
   };
 
@@ -411,12 +430,12 @@ export default function App() {
     applySettings(draft);
     setSettingsOpen(false);
     const win = getCurrentWindow();
-    if (mode === "vosk-ja" || mode === "vosk-es") {
+    if ((mode === "vosk-ja" || mode === "vosk-es") && running) {
       win.setSize(new LogicalSize(draft.width, draft.jaHeight));
-      win.setPosition(new LogicalPosition(0, Math.max(0, 950 - (draft.jaHeight - draft.enHeight))));
+      win.setPosition(new LogicalPosition(0, bottomAlignedY(draft.jaHeight)));
     } else {
       win.setSize(new LogicalSize(draft.width, draft.enHeight));
-      win.setPosition(new LogicalPosition(0, 950));
+      win.setPosition(new LogicalPosition(0, bottomAlignedY(draft.enHeight)));
     }
   };
 
@@ -486,7 +505,7 @@ export default function App() {
   if (mode === "vosk-ja" || mode === "vosk-es") {
     const isEs = mode === "vosk-es";
     return (
-      <div className="bar bar--ja" data-tauri-drag-region>
+      <div className="bar bar--ja" data-tauri-drag-region ref={jaBarRef}>
         <div className="bar-top">
           <div className="bar-left">
             <button className="btn" onClick={toggle} title={running ? "Stop" : "Start"}>

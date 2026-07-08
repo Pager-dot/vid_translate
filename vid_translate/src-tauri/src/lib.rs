@@ -80,11 +80,14 @@ fn python_command() -> &'static str {
     use std::sync::OnceLock;
     static PYTHON_BIN: OnceLock<&'static str> = OnceLock::new();
     *PYTHON_BIN.get_or_init(|| {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_ok()
-        {
+        let works = |bin: &str| {
+            std::process::Command::new(bin)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if works("python3") {
             "python3"
         } else {
             "python"
