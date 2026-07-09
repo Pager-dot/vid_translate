@@ -10,7 +10,7 @@ const SETTINGS_H = 460;
 
 const DEFAULT_SETTINGS = {
   ollamaKey: "",
-  ollamaModel: "gemma4:31b-cloud",
+  ollamaModel: "gemma3:27b",
   fontFamily: "system-ui",
   fontScale: 1.0,
   opacity: 0.78,
@@ -39,9 +39,17 @@ function slideWindow(text) {
   return words.slice(-MAX_WORDS);
 }
 
-const TASKBAR_MARGIN = 40;
-function bottomAlignedY(height) {
-  return Math.max(0, window.screen.height - height - TASKBAR_MARGIN);
+// Resize while keeping whatever bottom-left corner the window is currently at
+// (instead of resetting to a screen-relative default), so a manual drag isn't
+// discarded the next time content changes size.
+async function resizeKeepingBottom(win, width, height) {
+  const scale = await win.scaleFactor();
+  const curPos = (await win.outerPosition()).toLogical(scale);
+  const curSize = (await win.outerSize()).toLogical(scale);
+  const bottom = curPos.y + curSize.height;
+  const newY = Math.max(0, bottom - height);
+  await win.setSize(new LogicalSize(width, height));
+  await win.setPosition(new LogicalPosition(curPos.x, newY));
 }
 
 function SettingsPanel({ draft, setDraft, onSave, onClose }) {
@@ -263,7 +271,7 @@ export default function App() {
   const [running, setRunning]             = useState(false);
   const [mode, setMode]                   = useState("vosk");
   const [settingsOpen, setSettingsOpen]   = useState(false);
-  const [platform, setPlatform]           = useState("linux");
+  const [downloadProgress, setDownloadProgress] = useState(null); // { kind, status, downloaded, total, error }
 
   const [settings, setSettings] = useState(loadSettings);
   const [draft, setDraft]       = useState(settings);
@@ -288,9 +296,7 @@ export default function App() {
     if (!hasMountedRef.current) { hasMountedRef.current = true; return; }
     if (settingsOpen) return; // settings panel manages its own size
     if ((mode === "vosk-ja" || mode === "vosk-es") && running) return; // auto-fit effect takes over
-    const win = getCurrentWindow();
-    win.setSize(new LogicalSize(settings.width, settings.enHeight));
-    win.setPosition(new LogicalPosition(0, bottomAlignedY(settings.enHeight)));
+    resizeKeepingBottom(getCurrentWindow(), settings.width, settings.enHeight);
   }, [mode, running, settings.width, settings.enHeight]);
 
   // Auto-fit window height to actual rendered content in JA/ES mode while listening,
@@ -304,8 +310,7 @@ export default function App() {
     const ro = new ResizeObserver((entries) => {
       const contentH = Math.ceil(entries[0].contentRect.height);
       const clamped = Math.min(settings.jaHeight, Math.max(settings.enHeight, contentH));
-      win.setSize(new LogicalSize(settings.width, clamped));
-      win.setPosition(new LogicalPosition(0, bottomAlignedY(clamped)));
+      resizeKeepingBottom(win, settings.width, clamped);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -315,7 +320,6 @@ export default function App() {
     invoke("get_model_path").then(setModelPath);
     invoke("get_vosk_ja_model_path").then(setVoskJaModelPath);
     invoke("get_vosk_es_model_path").then(setVoskEsModelPath);
-    invoke("get_platform").then(setPlatform);
 
     const setupListeners = async () => {
       const unlistenTx = await listen("transcription", (event) => {
@@ -361,7 +365,17 @@ export default function App() {
         }
       });
 
-      unlistenRefs.current = [unlistenTx, unlistenStatus];
+      const unlistenDownload = await listen("vosk_download_progress", (event) => {
+        setDownloadProgress(event.payload);
+        if (event.payload.status === "done") {
+          setTimeout(() => {
+            setDownloadProgress(null);
+            toggleRef.current();
+          }, 400);
+        }
+      });
+
+      unlistenRefs.current = [unlistenTx, unlistenStatus, unlistenDownload];
     };
 
     setupListeners();
@@ -370,6 +384,8 @@ export default function App() {
       clearTimeout(clearTimer.current);
     };
   }, []);
+
+  const toggleRef = useRef(() => {});
 
   const toggle = async () => {
     if (running) {
@@ -394,6 +410,7 @@ export default function App() {
       });
     }
   };
+  useEffect(() => { toggleRef.current = toggle; });
 
   const MODES = ["vosk", "vosk-ja", "vosk-es"];
   const toggleMode = () => {
@@ -415,13 +432,8 @@ export default function App() {
   const closeSettings = async () => {
     setSettingsOpen(false);
     const win = getCurrentWindow();
-    if ((mode === "vosk-ja" || mode === "vosk-es") && running) {
-      win.setSize(new LogicalSize(settings.width, settings.jaHeight));
-      win.setPosition(new LogicalPosition(0, bottomAlignedY(settings.jaHeight)));
-    } else {
-      win.setSize(new LogicalSize(settings.width, settings.enHeight));
-      win.setPosition(new LogicalPosition(0, bottomAlignedY(settings.enHeight)));
-    }
+    const h = (mode === "vosk-ja" || mode === "vosk-es") && running ? settings.jaHeight : settings.enHeight;
+    resizeKeepingBottom(win, settings.width, h);
   };
 
   const saveSettings = async () => {
@@ -430,13 +442,8 @@ export default function App() {
     applySettings(draft);
     setSettingsOpen(false);
     const win = getCurrentWindow();
-    if ((mode === "vosk-ja" || mode === "vosk-es") && running) {
-      win.setSize(new LogicalSize(draft.width, draft.jaHeight));
-      win.setPosition(new LogicalPosition(0, bottomAlignedY(draft.jaHeight)));
-    } else {
-      win.setSize(new LogicalSize(draft.width, draft.enHeight));
-      win.setPosition(new LogicalPosition(0, bottomAlignedY(draft.enHeight)));
-    }
+    const h = (mode === "vosk-ja" || mode === "vosk-es") && running ? draft.jaHeight : draft.enHeight;
+    resizeKeepingBottom(win, draft.width, h);
   };
 
   const closeApp = () => getCurrentWindow().close();
@@ -453,50 +460,41 @@ export default function App() {
     );
   }
 
-  // ── Setup screens ──────────────────────────────────────────────────────────
-  const isWindows = platform === "windows";
+  // ── Setup screens: model missing → one-click auto-download, no manual steps ──
+  const MISSING_MODEL_KIND = {
+    model_missing: { kind: "en", label: "English" },
+    vosk_ja_model_missing: { kind: "ja", label: "Japanese" },
+    vosk_es_model_missing: { kind: "es", label: "Spanish" },
+  };
 
-  if (status === "model_missing") {
-    const cmd = isWindows
-      ? `New-Item -ItemType Directory -Force -Path (Split-Path "${modelPath}") | Out-Null; Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -OutFile "$env:TEMP\\vosk.zip"; Expand-Archive "$env:TEMP\\vosk.zip" -DestinationPath "$env:TEMP" -Force; Move-Item "$env:TEMP\\vosk-model-small-en-us-0.15" "${modelPath}" -Force`
-      : `mkdir -p ${modelPath} && curl -L https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip -o /tmp/vosk.zip && unzip /tmp/vosk.zip -d /tmp && mv /tmp/vosk-model-small-en-us-0.15 ${modelPath}`;
+  if (MISSING_MODEL_KIND[status]) {
+    const { kind, label } = MISSING_MODEL_KIND[status];
+    const dl = downloadProgress && downloadProgress.kind === kind ? downloadProgress : null;
+    const pct = dl && dl.total ? Math.round((dl.downloaded / dl.total) * 100) : null;
+
     return (
       <div className="bar bar--setup" data-tauri-drag-region>
-        <span className="setup-text">
-          Vosk model not found. Run:
-          <code>{cmd}</code>
-        </span>
-        <button className="btn" onClick={toggle}>Retry</button>
-      </div>
-    );
-  }
-
-  if (status === "vosk_ja_model_missing") {
-    const cmd = isWindows
-      ? `New-Item -ItemType Directory -Force -Path (Split-Path "${voskJaModelPath}") | Out-Null; Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-ja-0.22.zip -OutFile "$env:TEMP\\vosk-ja.zip"; Expand-Archive "$env:TEMP\\vosk-ja.zip" -DestinationPath "$env:TEMP" -Force; Move-Item "$env:TEMP\\vosk-model-ja-0.22" "${voskJaModelPath}" -Force`
-      : `curl -L https://alphacephei.com/vosk/models/vosk-model-ja-0.22.zip -o /tmp/vosk-ja.zip && unzip /tmp/vosk-ja.zip -d /tmp && mv /tmp/vosk-model-ja-0.22 ${voskJaModelPath}`;
-    return (
-      <div className="bar bar--setup" data-tauri-drag-region>
-        <span className="setup-text">
-          Vosk Japanese model not found. Run:
-          <code>{cmd}</code>
-        </span>
-        <button className="btn" onClick={toggle}>Retry</button>
-      </div>
-    );
-  }
-
-  if (status === "vosk_es_model_missing") {
-    const cmd = isWindows
-      ? `New-Item -ItemType Directory -Force -Path (Split-Path "${voskEsModelPath}") | Out-Null; Invoke-WebRequest https://alphacephei.com/vosk/models/vosk-model-es-0.42.zip -OutFile "$env:TEMP\\vosk-es.zip"; Expand-Archive "$env:TEMP\\vosk-es.zip" -DestinationPath "$env:TEMP" -Force; Move-Item "$env:TEMP\\vosk-model-es-0.42" "${voskEsModelPath}" -Force`
-      : `curl -L https://alphacephei.com/vosk/models/vosk-model-es-0.42.zip -o /tmp/vosk-es.zip && unzip /tmp/vosk-es.zip -d /tmp && mv /tmp/vosk-model-es-0.42 ${voskEsModelPath}`;
-    return (
-      <div className="bar bar--setup" data-tauri-drag-region>
-        <span className="setup-text">
-          Vosk Spanish model not found. Run:
-          <code>{cmd}</code>
-        </span>
-        <button className="btn" onClick={toggle}>Retry</button>
+        {!dl && (
+          <>
+            <span className="setup-text">{label} speech model not downloaded yet.</span>
+            <button className="btn" onClick={() => invoke("download_vosk_model", { kind })}>
+              Download
+            </button>
+          </>
+        )}
+        {dl && dl.status !== "error" && (
+          <span className="setup-text">
+            {dl.status === "downloading" ? `Downloading… ${pct !== null ? pct + "%" : ""}` : "Extracting…"}
+          </span>
+        )}
+        {dl && dl.status === "error" && (
+          <>
+            <span className="setup-text">Download failed: {dl.error}</span>
+            <button className="btn" onClick={() => invoke("download_vosk_model", { kind })}>
+              Retry
+            </button>
+          </>
+        )}
       </div>
     );
   }

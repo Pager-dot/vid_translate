@@ -2,7 +2,7 @@ mod audio;
 mod recognizer;
 
 use serde::Serialize;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -74,93 +74,273 @@ fn get_vosk_es_model_path() -> String {
     vosk_es_model_path().to_string_lossy().to_string()
 }
 
-/// Picks whichever Python binary name is actually on PATH: "python3" on Linux/macOS,
-/// "python" on most Windows installs. Resolved once and cached.
-fn python_command() -> &'static str {
-    use std::sync::OnceLock;
-    static PYTHON_BIN: OnceLock<&'static str> = OnceLock::new();
-    *PYTHON_BIN.get_or_init(|| {
-        let works = |bin: &str| {
-            std::process::Command::new(bin)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        };
-        if works("python3") {
-            "python3"
-        } else {
-            "python"
-        }
-    })
+fn vosk_model_url_and_path(kind: &str) -> Result<(&'static str, std::path::PathBuf), String> {
+    match kind {
+        "en" => Ok((
+            "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
+            vosk_model_path(),
+        )),
+        "ja" => Ok((
+            "https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip",
+            vosk_ja_model_path(),
+        )),
+        "es" => Ok((
+            "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip",
+            vosk_es_model_path(),
+        )),
+        other => Err(format!("unknown model kind: {other}")),
+    }
 }
 
+#[derive(Serialize, Clone)]
+struct ModelDownloadProgress {
+    kind: String,
+    status: String, // "downloading" | "extracting" | "done" | "error"
+    downloaded: Option<u64>,
+    total: Option<u64>,
+    error: Option<String>,
+}
+
+/// Downloads and extracts a Vosk model zip directly — no external tools (curl, PowerShell,
+/// Python) required. Emits "vosk_download_progress" events for the settings/setup UI.
 #[tauri::command]
-fn get_platform() -> String {
-    std::env::consts::OS.to_string()
+fn download_vosk_model(app: tauri::AppHandle, kind: String) {
+    std::thread::spawn(move || {
+        let emit = |status: &str, downloaded: Option<u64>, total: Option<u64>, error: Option<String>| {
+            let _ = app.emit(
+                "vosk_download_progress",
+                ModelDownloadProgress {
+                    kind: kind.clone(),
+                    status: status.into(),
+                    downloaded,
+                    total,
+                    error,
+                },
+            );
+        };
+
+        let (url, target_dir) = match vosk_model_url_and_path(&kind) {
+            Ok(v) => v,
+            Err(e) => {
+                emit("error", None, None, Some(e));
+                return;
+            }
+        };
+
+        emit("downloading", Some(0), None, None);
+
+        let resp = match ureq::get(url).call() {
+            Ok(r) => r,
+            Err(e) => {
+                emit("error", None, None, Some(format!("download failed: {e}")));
+                return;
+            }
+        };
+        let total = resp
+            .header("Content-Length")
+            .and_then(|s| s.parse::<u64>().ok());
+
+        let tmp_dir = std::env::temp_dir().join(format!("vid_translate_dl_{kind}"));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
+            emit("error", None, None, Some(format!("cannot create temp dir: {e}")));
+            return;
+        }
+        let zip_path = tmp_dir.join("model.zip");
+
+        let mut reader = resp.into_reader();
+        let mut file = match std::fs::File::create(&zip_path) {
+            Ok(f) => f,
+            Err(e) => {
+                emit("error", None, None, Some(format!("cannot create temp file: {e}")));
+                return;
+            }
+        };
+
+        let mut buf = [0u8; 65536];
+        let mut downloaded: u64 = 0;
+        loop {
+            let n = match reader.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    emit("error", None, None, Some(format!("download error: {e}")));
+                    return;
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            if let Err(e) = file.write_all(&buf[..n]) {
+                emit("error", None, None, Some(format!("write error: {e}")));
+                return;
+            }
+            downloaded += n as u64;
+            emit("downloading", Some(downloaded), total, None);
+        }
+        drop(file);
+
+        emit("extracting", None, None, None);
+
+        let extract_dir = tmp_dir.join("extracted");
+        if let Err(e) = std::fs::create_dir_all(&extract_dir) {
+            emit("error", None, None, Some(format!("cannot create extract dir: {e}")));
+            return;
+        }
+
+        let zip_file = match std::fs::File::open(&zip_path) {
+            Ok(f) => f,
+            Err(e) => {
+                emit("error", None, None, Some(format!("cannot open zip: {e}")));
+                return;
+            }
+        };
+        let mut archive = match zip::ZipArchive::new(zip_file) {
+            Ok(a) => a,
+            Err(e) => {
+                emit("error", None, None, Some(format!("bad zip file: {e}")));
+                return;
+            }
+        };
+
+        for i in 0..archive.len() {
+            let mut entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let outpath = match entry.enclosed_name() {
+                Some(p) => extract_dir.join(p),
+                None => continue,
+            };
+            if entry.is_dir() {
+                let _ = std::fs::create_dir_all(&outpath);
+            } else {
+                if let Some(p) = outpath.parent() {
+                    let _ = std::fs::create_dir_all(p);
+                }
+                let outfile = match std::fs::File::create(&outpath) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let mut outfile = outfile;
+                let _ = std::io::copy(&mut entry, &mut outfile);
+            }
+        }
+
+        // The zip contains a single top-level folder (e.g. vosk-model-small-en-us-0.15/) —
+        // find it and move it into place under the name lib.rs expects.
+        let top_level = std::fs::read_dir(&extract_dir)
+            .ok()
+            .and_then(|d| d.filter_map(|e| e.ok()).find(|e| e.path().is_dir()))
+            .map(|e| e.path());
+
+        let top_level = match top_level {
+            Some(p) => p,
+            None => {
+                emit("error", None, None, Some("unexpected zip layout".into()));
+                return;
+            }
+        };
+
+        if let Some(parent) = target_dir.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::remove_dir_all(&target_dir);
+        if let Err(e) = std::fs::rename(&top_level, &target_dir) {
+            emit("error", None, None, Some(format!("cannot move model into place: {e}")));
+            return;
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        emit("done", None, None, None);
+    });
 }
 
-fn translate_server_path() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("vid_translate")
-        .join("translate_server.py")
-}
-
-/// Spawns the translate_server.py process and returns (stdin_writer, stdout_reader).
-/// The server stays alive for the lifetime of the pipeline — no per-call startup cost.
-/// `source_lang` is an ISO-639-1 code ("ja" or "es") telling the script which
-/// source language's system prompt/filler handling to use.
-fn spawn_translate_server(
-    ollama_key: Option<String>,
-    ollama_model: Option<String>,
+/// Streams a single-shot translation from Ollama (cloud if a key is given, else local
+/// http://localhost:11434). Calls `on_update` with the accumulated translation as tokens
+/// arrive, checking `stop_flag` between chunks so a mid-request Stop feels instant.
+/// Returns the final accumulated text (empty if stopped before anything came back).
+fn translate_blocking(
+    ollama_key: &Option<String>,
+    ollama_model: &Option<String>,
     source_lang: &str,
-) -> Result<
-    (
-        std::io::BufWriter<std::process::ChildStdin>,
-        BufReader<std::process::ChildStdout>,
-    ),
-    String,
-> {
-    let script = translate_server_path();
-    if !script.exists() {
-        return Err(format!(
-            "translate_server.py not found at {}",
-            script.display()
-        ));
+    text: &str,
+    stop_flag: &Arc<AtomicBool>,
+    mut on_update: impl FnMut(&str),
+) -> String {
+    let key = ollama_key.as_ref().filter(|k| !k.is_empty());
+    let base_url = if key.is_some() {
+        "https://ollama.com"
+    } else {
+        "http://localhost:11434"
+    };
+    let model = ollama_model
+        .clone()
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "gemma3:27b".to_string());
+    let lang_name = match source_lang {
+        "ja" => "Japanese",
+        "es" => "Spanish",
+        other => other,
+    };
+    let system_prompt = format!(
+        "You are a real-time speech translator. You receive short, possibly imperfect \
+         {lang_name} speech-to-text fragments and must translate them into natural, fluent \
+         English. Output ONLY the English translation with no notes, quotes, or explanations. \
+         If the fragment is just filler noise or has nothing translatable, output nothing."
+    );
+
+    let url = format!("{base_url}/api/generate");
+    let body = serde_json::json!({
+        "model": model,
+        "system": system_prompt,
+        "prompt": text,
+        "stream": true,
+    });
+
+    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+    if let Some(k) = key {
+        req = req.set("Authorization", &format!("Bearer {k}"));
     }
 
-    let mut cmd = std::process::Command::new(python_command());
-    cmd.arg(&script)
-        .env("SOURCE_LANG", source_lang)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit());
+    let resp = match req.send_string(&body.to_string()) {
+        Ok(r) => r,
+        Err(e) => return format!("[translation error: {e}]"),
+    };
 
-    if let Some(key) = ollama_key.filter(|k| !k.is_empty()) {
-        cmd.env("OLLAMA_KEY", key);
+    let mut reader = BufReader::new(resp.into_reader());
+    let mut accumulated = String::new();
+    let mut line = String::new();
+    loop {
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        line.clear();
+        let n = match reader.read_line(&mut line) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let chunk: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(piece) = chunk.get("response").and_then(|v| v.as_str()) {
+            if !piece.is_empty() {
+                accumulated.push_str(piece);
+                on_update(&accumulated);
+            }
+        }
+        if chunk.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
+            break;
+        }
     }
-    if let Some(model) = ollama_model.filter(|m| !m.is_empty()) {
-        cmd.env("OLLAMA_MODEL", model);
-    }
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn translate_server.py: {}", e))?;
-
-    let stdin = std::io::BufWriter::new(child.stdin.take().unwrap());
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-
-    // Wait for "READY" line before returning
-    let mut ready = String::new();
-    stdout
-        .read_line(&mut ready)
-        .map_err(|e| format!("translate server did not send READY: {}", e))?;
-
-    // Leak the child so it stays alive; it exits when stdin is dropped
-    std::mem::forget(child);
-
-    Ok((stdin, stdout))
+    accumulated
 }
 
 #[tauri::command]
@@ -184,12 +364,10 @@ fn start_listening(
     let app_handle = app.clone();
     let mode = mode.unwrap_or_else(|| "vosk".into());
 
-    let handle = std::thread::spawn(move || {
-        match mode.as_str() {
-            "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag, ollama_key, ollama_model),
-            "vosk-es" => run_vosk_es_pipeline(app_handle, stop_flag, ollama_key, ollama_model),
-            _ => run_vosk_pipeline(app_handle, stop_flag),
-        }
+    let handle = std::thread::spawn(move || match mode.as_str() {
+        "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag, ollama_key, ollama_model),
+        "vosk-es" => run_vosk_es_pipeline(app_handle, stop_flag, ollama_key, ollama_model),
+        _ => run_vosk_pipeline(app_handle, stop_flag),
     });
 
     pipeline.thread = Some(handle);
@@ -240,70 +418,69 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
     }
 }
 
-fn run_vosk_es_pipeline(
+fn is_japanese_text(text: &str) -> bool {
+    text.chars().any(|c| {
+        ('\u{3040}'..='\u{309F}').contains(&c) || // hiragana
+        ('\u{30A0}'..='\u{30FF}').contains(&c) || // katakana
+        ('\u{4E00}'..='\u{9FFF}').contains(&c) || // CJK unified
+        ('\u{3400}'..='\u{4DBF}').contains(&c)    // CJK extension A
+    })
+}
+
+/// Shared JA/ES pipeline: Vosk recognizes the source language, finalized sentences are
+/// handed off to a worker thread that translates them via Ollama (native Rust HTTP calls,
+/// no subprocess) so the audio thread never blocks on network I/O.
+fn run_translated_pipeline(
     app_handle: tauri::AppHandle,
     stop_flag: Arc<AtomicBool>,
     ollama_key: Option<String>,
     ollama_model: Option<String>,
+    model_path: std::path::PathBuf,
+    source_lang: &'static str,
 ) {
-    let es_path = vosk_es_model_path();
-    if !es_path.exists() {
-        let _ = app_handle.emit("status", StatusEvent { state: "vosk_es_model_missing".into() });
-        return;
-    }
-
     let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
 
-    let (tx_stdin, rx_stdout) = match spawn_translate_server(ollama_key, ollama_model, "es") {
-        Ok(pair) => pair,
-        Err(e) => {
-            eprintln!("[translate] {}", e);
-            let _ = app_handle.emit("status", StatusEvent { state: "error".into() });
-            return;
-        }
-    };
-
-    let tx_stdin = Arc::new(Mutex::new(tx_stdin));
-    let tx_stdin_cb = tx_stdin.clone();
-
-    let rx = audio::start_capture(stop_flag.clone());
-    let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
-
+    let (tx_text, rx_text) = std::sync::mpsc::channel::<String>();
     let app_for_translate = app_handle.clone();
+    let stop_flag_worker = stop_flag.clone();
 
-    // Reader thread: receives translated lines from the translate server, emits events
     std::thread::spawn(move || {
-        let mut stdout = rx_stdout;
-        loop {
-            let mut last_text = String::new();
-            loop {
-                let mut line = String::new();
-                if stdout.read_line(&mut line).unwrap_or(0) == 0 { return; }
-                let line = line.trim().to_string();
-                if line == "---" {
-                    if !last_text.is_empty() {
-                        let _ = app_for_translate.emit("transcription", TranscriptionEvent {
-                            text: last_text,
-                            current: String::new(),
-                            kind: "final".into(),
-                        });
-                    }
-                    break;
-                } else if !line.is_empty() {
-                    last_text = line.clone();
-                    let _ = app_for_translate.emit("transcription", TranscriptionEvent {
-                        text: line,
+        for text in rx_text {
+            if stop_flag_worker.load(Ordering::Relaxed) {
+                break;
+            }
+            let app_line = app_for_translate.clone();
+            let final_text = translate_blocking(
+                &ollama_key,
+                &ollama_model,
+                source_lang,
+                &text,
+                &stop_flag_worker,
+                |partial| {
+                    let _ = app_line.emit("transcription", TranscriptionEvent {
+                        text: partial.to_string(),
                         current: String::new(),
                         kind: "streaming-en".into(),
                     });
-                }
+                },
+            );
+            if !final_text.is_empty() {
+                let _ = app_line.emit("transcription", TranscriptionEvent {
+                    text: final_text,
+                    current: String::new(),
+                    kind: "final".into(),
+                });
             }
         }
     });
 
+    let rx = audio::start_capture(stop_flag.clone());
+    let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
+
     let app_for_partial = app_handle.clone();
+    let is_ja = source_lang == "ja";
     let result = recognizer::run(
-        es_path.to_str().unwrap_or(""),
+        model_path.to_str().unwrap_or(""),
         rx,
         move |ev| {
             use recognizer::RecognitionResult::*;
@@ -316,13 +493,15 @@ fn run_vosk_es_pipeline(
                     });
                 }
                 Final(text) if !text.is_empty() => {
-                    eprintln!("[vosk→rust] sending: {:?}", text);
-                    let payload = serde_json::json!({"text": text});
-                    let mut msg = serde_json::to_string(&payload).unwrap();
-                    msg.push('\n');
-                    let mut stdin = tx_stdin_cb.lock().unwrap();
-                    let _ = stdin.write_all(msg.as_bytes());
-                    let _ = stdin.flush();
+                    if is_ja && !is_japanese_text(&text) {
+                        let _ = app_for_partial.emit("transcription", TranscriptionEvent {
+                            text,
+                            current: String::new(),
+                            kind: "final".into(),
+                        });
+                    } else {
+                        let _ = tx_text.send(text);
+                    }
                 }
                 _ => {}
             }
@@ -330,20 +509,25 @@ fn run_vosk_es_pipeline(
     );
 
     if let Err(e) = result {
-        eprintln!("[lib] ES recognizer error: {}", e);
+        eprintln!("[lib] {} recognizer error: {}", source_lang, e);
         let _ = app_handle.emit("status", StatusEvent { state: "error".into() });
     } else {
         let _ = app_handle.emit("status", StatusEvent { state: "idle".into() });
     }
 }
 
-fn is_japanese_text(text: &str) -> bool {
-    text.chars().any(|c| {
-        ('\u{3040}'..='\u{309F}').contains(&c) || // hiragana
-        ('\u{30A0}'..='\u{30FF}').contains(&c) || // katakana
-        ('\u{4E00}'..='\u{9FFF}').contains(&c) || // CJK unified
-        ('\u{3400}'..='\u{4DBF}').contains(&c)    // CJK extension A
-    })
+fn run_vosk_es_pipeline(
+    app_handle: tauri::AppHandle,
+    stop_flag: Arc<AtomicBool>,
+    ollama_key: Option<String>,
+    ollama_model: Option<String>,
+) {
+    let es_path = vosk_es_model_path();
+    if !es_path.exists() {
+        let _ = app_handle.emit("status", StatusEvent { state: "vosk_es_model_missing".into() });
+        return;
+    }
+    run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, es_path, "es");
 }
 
 fn run_vosk_ja_pipeline(
@@ -357,100 +541,7 @@ fn run_vosk_ja_pipeline(
         let _ = app_handle.emit("status", StatusEvent { state: "vosk_ja_model_missing".into() });
         return;
     }
-
-    let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
-
-    let (tx_stdin, rx_stdout) = match spawn_translate_server(ollama_key, ollama_model, "ja") {
-        Ok(pair) => pair,
-        Err(e) => {
-            eprintln!("[translate] {}", e);
-            let _ = app_handle.emit("status", StatusEvent { state: "error".into() });
-            return;
-        }
-    };
-
-    // Wrap stdin in Mutex so the Vosk callback (sync) can write to it
-    let tx_stdin = Arc::new(Mutex::new(tx_stdin));
-    let tx_stdin_cb = tx_stdin.clone();
-
-    let rx = audio::start_capture(stop_flag.clone());
-    let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
-
-    let app_for_translate = app_handle.clone();
-
-    // Reader thread: receives translated lines from the translate server, emits events
-    std::thread::spawn(move || {
-        let mut stdout = rx_stdout;
-        loop {
-            let mut last_text = String::new();
-            loop {
-                let mut line = String::new();
-                if stdout.read_line(&mut line).unwrap_or(0) == 0 { return; }
-                let line = line.trim().to_string();
-                if line == "---" {
-                    if !last_text.is_empty() {
-                        let _ = app_for_translate.emit("transcription", TranscriptionEvent {
-                            text: last_text,
-                            current: String::new(),
-                            kind: "final".into(),
-                        });
-                    }
-                    break;
-                } else if !line.is_empty() {
-                    last_text = line.clone();
-                    let _ = app_for_translate.emit("transcription", TranscriptionEvent {
-                        text: line,
-                        current: String::new(),
-                        kind: "streaming-en".into(),
-                    });
-                }
-            }
-        }
-    });
-
-    let app_for_partial = app_handle.clone();
-    let result = recognizer::run(
-        ja_path.to_str().unwrap_or(""),
-        rx,
-        move |ev| {
-            use recognizer::RecognitionResult::*;
-            match ev {
-                Partial(text) => {
-                    let _ = app_for_partial.emit("transcription", TranscriptionEvent {
-                        text,
-                        current: String::new(),
-                        kind: "partial".into(),
-                    });
-                }
-                Final(text) if !text.is_empty() => {
-                    if is_japanese_text(&text) {
-                        eprintln!("[vosk→rust] sending: {:?}", text);
-                        let payload = serde_json::json!({"text": text});
-                        let mut msg = serde_json::to_string(&payload).unwrap();
-                        msg.push('\n');
-                        let mut stdin = tx_stdin_cb.lock().unwrap();
-                        let _ = stdin.write_all(msg.as_bytes());
-                        let _ = stdin.flush();
-                    } else {
-                        eprintln!("[vosk→rust] english passthrough: {:?}", text);
-                        let _ = app_for_partial.emit("transcription", TranscriptionEvent {
-                            text,
-                            current: String::new(),
-                            kind: "final".into(),
-                        });
-                    }
-                }
-                _ => {}
-            }
-        },
-    );
-
-    if let Err(e) = result {
-        eprintln!("[lib] JA recognizer error: {}", e);
-        let _ = app_handle.emit("status", StatusEvent { state: "error".into() });
-    } else {
-        let _ = app_handle.emit("status", StatusEvent { state: "idle".into() });
-    }
+    run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, ja_path, "ja");
 }
 
 #[tauri::command]
@@ -466,56 +557,42 @@ struct PullProgressEvent {
     total: Option<u64>,
 }
 
-/// Calls local Ollama pull API and streams progress as "pull_progress" events.
-/// Model name is passed as sys.argv[1] to avoid shell injection.
+/// Calls local Ollama's pull API and streams progress as "pull_progress" events.
 #[tauri::command]
 fn pull_model(app: tauri::AppHandle, model: String) {
     std::thread::spawn(move || {
-        let python_code = r#"
-import urllib.request, json, sys
-model = sys.argv[1]
-url = "http://localhost:11434/api/pull"
-payload = json.dumps({"model": model, "stream": True}).encode()
-req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-try:
-    with urllib.request.urlopen(req, timeout=600) as r:
-        for line in r:
-            line = line.strip()
-            if line:
-                print(line.decode(), flush=True)
-except Exception as e:
-    print(json.dumps({"status": "error", "error": str(e)}), flush=True)
-"#;
-        let mut child = match std::process::Command::new(python_command())
-            .arg("-c").arg(python_code)
-            .arg(&model)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+        let body = serde_json::json!({ "model": model, "stream": true });
+        let resp = match ureq::post("http://localhost:11434/api/pull")
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string())
         {
-            Ok(c) => c,
+            Ok(r) => r,
             Err(e) => {
-                eprintln!("[pull] spawn failed: {}", e);
+                let _ = app.emit("pull_progress", PullProgressEvent {
+                    status: "error".into(),
+                    completed: None,
+                    total: None,
+                });
+                eprintln!("[pull] request failed: {e}");
                 return;
             }
         };
 
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-                        let event = PullProgressEvent {
-                            status: val.get("status").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-                            completed: val.get("completed").and_then(|v| v.as_u64()),
-                            total: val.get("total").and_then(|v| v.as_u64()),
-                        };
-                        let _ = app.emit("pull_progress", &event);
-                    }
-                }
+        let reader = BufReader::new(resp.into_reader());
+        for line in reader.lines() {
+            let Ok(line) = line else { continue };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                let event = PullProgressEvent {
+                    status: val.get("status").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                    completed: val.get("completed").and_then(|v| v.as_u64()),
+                    total: val.get("total").and_then(|v| v.as_u64()),
+                };
+                let _ = app.emit("pull_progress", &event);
             }
         }
-        child.wait().ok();
     });
 }
 
@@ -530,8 +607,8 @@ pub fn run() {
             get_model_path,
             get_vosk_ja_model_path,
             get_vosk_es_model_path,
-            get_platform,
             pull_model,
+            download_vosk_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
