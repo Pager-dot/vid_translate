@@ -101,6 +101,24 @@ struct ModelDownloadProgress {
     error: Option<String>,
 }
 
+/// Recursively copies a directory tree. Used as a fallback when `rename` fails with
+/// EXDEV (source and destination on different filesystems/mount points, e.g. /tmp
+/// being tmpfs while the data dir is on disk).
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Downloads and extracts a Vosk model zip directly — no external tools (curl, PowerShell,
 /// Python) required. Emits "vosk_download_progress" events for the settings/setup UI.
 #[tauri::command]
@@ -245,9 +263,14 @@ fn download_vosk_model(app: tauri::AppHandle, kind: String) {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::remove_dir_all(&target_dir);
-        if let Err(e) = std::fs::rename(&top_level, &target_dir) {
-            emit("error", None, None, Some(format!("cannot move model into place: {e}")));
-            return;
+        // rename() fails with EXDEV when the temp dir and the target dir are on
+        // different filesystems (e.g. /tmp is tmpfs on many distros). Fall back
+        // to a recursive copy in that case.
+        if std::fs::rename(&top_level, &target_dir).is_err() {
+            if let Err(e) = copy_dir_recursive(&top_level, &target_dir) {
+                emit("error", None, None, Some(format!("cannot move model into place: {e}")));
+                return;
+            }
         }
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
