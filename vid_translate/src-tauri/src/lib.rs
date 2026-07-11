@@ -59,21 +59,6 @@ fn vosk_es_model_path() -> std::path::PathBuf {
         .join("vosk-model-es")
 }
 
-#[tauri::command]
-fn get_model_path() -> String {
-    vosk_model_path().to_string_lossy().to_string()
-}
-
-#[tauri::command]
-fn get_vosk_ja_model_path() -> String {
-    vosk_ja_model_path().to_string_lossy().to_string()
-}
-
-#[tauri::command]
-fn get_vosk_es_model_path() -> String {
-    vosk_es_model_path().to_string_lossy().to_string()
-}
-
 fn vosk_model_url_and_path(kind: &str) -> Result<(&'static str, std::path::PathBuf), String> {
     match kind {
         "en" => Ok((
@@ -627,9 +612,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_listening,
             stop_listening,
-            get_model_path,
-            get_vosk_ja_model_path,
-            get_vosk_es_model_path,
             pull_model,
             download_vosk_model,
         ])
