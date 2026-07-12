@@ -606,17 +606,6 @@ fn pull_model(app: tauri::AppHandle, model: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // The AppImage ships its build machine's WebKitGTK but uses the *host's* EGL driver.
-    // A newer host Mesa than the bundled WebKit expects makes its DMA-BUF renderer abort
-    // with EGL_BAD_PARAMETER. Only inside an AppImage (APPDIR is set) — a system install
-    // runs against a matching WebKit and keeps hardware acceleration.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("APPDIR").is_some()
-        && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
-    {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(PipelineState::default()))
