@@ -28,9 +28,8 @@ vid_translate/
 │   ├── src/
 │   │   ├── main.rs             # Tauri entry point (unchanged)
 │   │   ├── lib.rs              # Commands, events, pipeline state
-│   │   ├── audio.rs            # System audio capture via parec
-│   │   ├── recognizer.rs       # Vosk streaming recognizer
-│   │   └── transcriber.rs      # Whisper wrapper (kept, unused for now)
+│   │   ├── audio/              # System audio capture (linux.rs / windows.rs)
+│   │   └── recognizer.rs       # Vosk streaming recognizer
 │   ├── Cargo.toml              # Rust dependencies
 │   ├── tauri.conf.json         # Window config
 │   └── capabilities/
@@ -73,11 +72,6 @@ unzip /tmp/vosk-model.zip -d /tmp/
 mv /tmp/vosk-model-small-en-us-0.15 ~/.local/share/vid_translate/vosk-model
 ```
 
-> A `whisper-rs` dependency is also in `Cargo.toml` with `ggml-tiny.bin` /
-> `ggml-base.bin` models at `~/.local/share/vid_translate/models/` — these
-> were used in an earlier batch-transcription approach and are currently unused.
-> They can be removed if disk space is a concern.
-
 ---
 
 ## Running the App
@@ -88,7 +82,7 @@ npm run tauri dev      # development (hot-reload frontend)
 npm run tauri build    # production build
 ```
 
-First compile takes 5–15 minutes (compiles whisper.cpp + vosk bindings from source).  
+First compile takes 5–15 minutes (compiles vosk bindings from source).  
 Subsequent builds are fast.
 
 ---
@@ -199,9 +193,9 @@ Vosk is a **streaming CTC model** — it processes 250 ms chunks in < 10 ms,
 outputting partial words as they are spoken (~100–200 ms end-to-end latency).
 This gives the YouTube-captions feel the project requires.
 
-Whisper code is kept in `transcriber.rs` / `Cargo.toml` for a future
-"translate to English" mode for non-English audio, which would require
-accepting higher latency.
+For non-English → English, the JA/ES modes use Vosk (Japanese/Spanish
+models) for recognition and Ollama for translation, keeping the
+streaming feel while still producing English output.
 
 ---
 
@@ -209,8 +203,6 @@ accepting higher latency.
 
 | Issue | Notes |
 |-------|-------|
-| English only | Vosk model is English. Non-English audio won't transcribe correctly. To add language support, download the appropriate Vosk language model and let user select. |
-| No translation | For non-English → English, Whisper (`transcriber.rs`) is already wired up; needs a UI toggle and mode switch in `lib.rs`. |
 | Model loads twice on rapid start/stop | `drop(h)` doesn't wait for the thread; rapid toggle can start a new Vosk load before the old one exits. Fix: `h.join()` with a timeout, or a proper cancellation token. |
 | Vosk logs to stderr | `LOG (VoskAPI:...)` lines appear in the terminal. Suppress by redirecting stderr in the Vosk init, or setting `VOSK_LOG_LEVEL=0` env var. |
 | Position not persisted | Window always starts at `x:0, y:950`. Save/restore position using Tauri's `window.outerPosition()` + app state file. |
