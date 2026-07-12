@@ -188,14 +188,14 @@ npx tauri build --bundles appimage
 Output lands in:
 
 ```
-src-tauri/target/release/bundle/appimage/vid_translate_0.1.0_amd64.AppImage
+src-tauri/target/release/bundle/appimage/vid_translate_0.0.1_amd64.AppImage
 ```
 
 First run — make it executable:
 
 ```bash
-chmod +x src-tauri/target/release/bundle/appimage/vid_translate_0.1.0_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/vid_translate_0.1.0_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/vid_translate_0.0.1_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/vid_translate_0.0.1_amd64.AppImage
 ```
 
 > `libvosk.so` is bundled inside the AppImage (via `tauri.linux.conf.json` + rpath magic in `build.rs`) — no system-wide Vosk install needed.

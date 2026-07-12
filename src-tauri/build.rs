@@ -1,4 +1,13 @@
 fn main() {
+    #[cfg(target_os = "windows")]
+    {
+        // libvosk.lib sits in the crate root. Local builds link only because the MSVC
+        // linker searches its working directory; say it explicitly so CI links too.
+        println!(
+            "cargo:rustc-link-search=native={}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+    }
     #[cfg(target_os = "linux")]
     {
         let vendor_dir =
