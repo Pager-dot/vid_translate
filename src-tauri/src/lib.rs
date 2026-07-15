@@ -1,4 +1,5 @@
 mod audio;
+mod marian;
 mod recognizer;
 
 use serde::Serialize;
@@ -7,7 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 #[derive(Serialize, Clone)]
 struct TranscriptionEvent {
@@ -358,6 +359,7 @@ fn start_listening(
     mode: Option<String>,
     ollama_key: Option<String>,
     ollama_model: Option<String>,
+    use_local_translation: Option<bool>,
 ) {
     let mut pipeline = state.lock().unwrap();
 
@@ -371,10 +373,11 @@ fn start_listening(
 
     let app_handle = app.clone();
     let mode = mode.unwrap_or_else(|| "vosk".into());
+    let use_local = use_local_translation.unwrap_or(false);
 
     let handle = std::thread::spawn(move || match mode.as_str() {
-        "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag, ollama_key, ollama_model),
-        "vosk-es" => run_vosk_es_pipeline(app_handle, stop_flag, ollama_key, ollama_model),
+        "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
+        "vosk-es" => run_vosk_es_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
         _ => run_vosk_pipeline(app_handle, stop_flag),
     });
 
@@ -445,36 +448,90 @@ fn run_translated_pipeline(
     ollama_model: Option<String>,
     model_path: std::path::PathBuf,
     source_lang: &'static str,
+    use_local: bool,
 ) {
     let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
 
-    let (tx_text, rx_text) = std::sync::mpsc::channel::<String>();
+    // The bool marks whether `text` is the true tail end of a spoken utterance (a real Vosk
+    // `Final`) vs. just an eagerly-flushed mid-utterance chunk. The frontend needs to tell
+    // these apart: a mid-utterance chunk shouldn't reset the live "currently speaking" caption,
+    // only a real utterance end should.
+    let (tx_text, rx_text) = std::sync::mpsc::channel::<(String, bool)>();
     let app_for_translate = app_handle.clone();
     let stop_flag_worker = stop_flag.clone();
 
     std::thread::spawn(move || {
-        for text in rx_text {
+        for (text, is_utterance_end) in rx_text {
             if stop_flag_worker.load(Ordering::Relaxed) {
                 break;
             }
+            if text.is_empty() {
+                // Nothing left to translate — every word of this utterance was already
+                // eagerly translated chunk-by-chunk. Still signal the end so the frontend
+                // clears the live caption instead of leaving the last chunk stuck on screen.
+                if is_utterance_end {
+                    let _ = app_for_translate.emit("transcription", TranscriptionEvent {
+                        text: String::new(),
+                        current: String::new(),
+                        kind: "utterance-end".into(),
+                    });
+                }
+                continue;
+            }
             let app_line = app_for_translate.clone();
-            let final_text = translate_blocking(
-                &ollama_key,
-                &ollama_model,
-                source_lang,
-                &text,
-                &stop_flag_worker,
-                |partial| {
+            let stop_flag_line = stop_flag_worker.clone();
+            let ollama_key = ollama_key.clone();
+            let ollama_model = ollama_model.clone();
+            let text_for_panic_msg = text.clone();
+
+            // A panic inside translate (e.g. a tch/libtorch-level error) must not silently
+            // kill this thread for the rest of the session — everything sent to tx_text
+            // afterward would otherwise be dropped with zero user-visible feedback.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let on_update = |partial: &str| {
                     let _ = app_line.emit("transcription", TranscriptionEvent {
                         text: partial.to_string(),
                         current: String::new(),
                         kind: "streaming-en".into(),
                     });
-                },
-            );
-            if !final_text.is_empty() {
-                let _ = app_line.emit("transcription", TranscriptionEvent {
-                    text: final_text,
+                };
+                let final_text = if use_local {
+                    let marian_state = app_line.state::<marian::MarianState>();
+                    marian::translate_local_blocking(
+                        source_lang,
+                        &text,
+                        &stop_flag_line,
+                        &marian_state,
+                        on_update,
+                    )
+                } else {
+                    translate_blocking(
+                        &ollama_key,
+                        &ollama_model,
+                        source_lang,
+                        &text,
+                        &stop_flag_line,
+                        on_update,
+                    )
+                };
+                if !final_text.is_empty() {
+                    let _ = app_line.emit("transcription", TranscriptionEvent {
+                        text: final_text,
+                        current: String::new(),
+                        kind: if is_utterance_end { "final".into() } else { "final-chunk".into() },
+                    });
+                }
+            }));
+
+            if let Err(e) = outcome {
+                let msg = e
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| e.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".into());
+                eprintln!("[translate] worker panicked on {text_for_panic_msg:?}: {msg}");
+                let _ = app_for_translate.emit("transcription", TranscriptionEvent {
+                    text: format!("[translation error: internal panic: {msg}]"),
                     current: String::new(),
                     kind: "final".into(),
                 });
@@ -487,6 +544,13 @@ fn run_translated_pipeline(
 
     let app_for_partial = app_handle.clone();
     let is_ja = source_lang == "ja";
+    // Vosk only fires `Final` once it detects a pause, so a long sentence spoken in one
+    // breath would otherwise sit untranslated until the speaker stops. To keep latency low
+    // we also watch the growing `Partial` text and hand off words to the translator as soon
+    // as STREAM_CHUNK_WORDS new ones accumulate, tracking how many words of the current
+    // utterance have already been sent so `Final` only flushes the leftover remainder.
+    const STREAM_CHUNK_WORDS: usize = 8;
+    let mut sent_word_count: usize = 0;
     let result = recognizer::run(
         model_path.to_str().unwrap_or(""),
         rx,
@@ -494,6 +558,14 @@ fn run_translated_pipeline(
             use recognizer::RecognitionResult::*;
             match ev {
                 Partial(text) => {
+                    let words: Vec<&str> = text.split_whitespace().collect();
+                    if words.len() >= sent_word_count + STREAM_CHUNK_WORDS {
+                        let chunk = words[sent_word_count..].join(" ");
+                        sent_word_count = words.len();
+                        if !is_ja || is_japanese_text(&chunk) {
+                            let _ = tx_text.send((chunk, false));
+                        }
+                    }
                     let _ = app_for_partial.emit("transcription", TranscriptionEvent {
                         text,
                         current: String::new(),
@@ -501,14 +573,24 @@ fn run_translated_pipeline(
                     });
                 }
                 Final(text) if !text.is_empty() => {
-                    if is_ja && !is_japanese_text(&text) {
+                    let words: Vec<&str> = text.split_whitespace().collect();
+                    let remaining = if words.len() > sent_word_count {
+                        words[sent_word_count..].join(" ")
+                    } else {
+                        String::new()
+                    };
+                    sent_word_count = 0;
+                    if remaining.is_empty() {
+                        // Everything was already sent eagerly — still flag utterance end.
+                        let _ = tx_text.send((String::new(), true));
+                    } else if is_ja && !is_japanese_text(&text) {
                         let _ = app_for_partial.emit("transcription", TranscriptionEvent {
-                            text,
+                            text: remaining,
                             current: String::new(),
                             kind: "final".into(),
                         });
                     } else {
-                        let _ = tx_text.send(text);
+                        let _ = tx_text.send((remaining, true));
                     }
                 }
                 _ => {}
@@ -529,13 +611,14 @@ fn run_vosk_es_pipeline(
     stop_flag: Arc<AtomicBool>,
     ollama_key: Option<String>,
     ollama_model: Option<String>,
+    use_local: bool,
 ) {
     let es_path = vosk_es_model_path();
     if !es_path.exists() {
         let _ = app_handle.emit("status", StatusEvent { state: "vosk_es_model_missing".into() });
         return;
     }
-    run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, es_path, "es");
+    run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, es_path, "es", use_local);
 }
 
 fn run_vosk_ja_pipeline(
@@ -543,13 +626,14 @@ fn run_vosk_ja_pipeline(
     stop_flag: Arc<AtomicBool>,
     ollama_key: Option<String>,
     ollama_model: Option<String>,
+    use_local: bool,
 ) {
     let ja_path = vosk_ja_model_path();
     if !ja_path.exists() {
         let _ = app_handle.emit("status", StatusEvent { state: "vosk_ja_model_missing".into() });
         return;
     }
-    run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, ja_path, "ja");
+    run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, ja_path, "ja", use_local);
 }
 
 #[tauri::command]
@@ -609,6 +693,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(PipelineState::default()))
+        .manage(marian::MarianState::default())
         .invoke_handler(tauri::generate_handler![
             start_listening,
             stop_listening,

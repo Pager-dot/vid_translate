@@ -5,7 +5,11 @@ import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/
 import "./App.css";
 
 const FINAL_LINGER_MS = 2500;
+const PENDING_CHUNK_MS = 500;
 const MAX_WORDS = 10;
+// Matches the backend's MAX_CHUNK_WORDS (src-tauri/src/marian.rs) so the live line reads
+// as "the chunk just translated", not a growing multi-chunk run-on sentence.
+const MAX_PENDING_WORDS = 8;
 const SETTINGS_H = 640;
 
 const DEFAULT_SETTINGS = {
@@ -17,6 +21,7 @@ const DEFAULT_SETTINGS = {
   width: null, // null = full display width
   enHeight: 90,
   jaHeight: 280,
+  useLocalTranslation: false,
 };
 
 function loadSettings() {
@@ -45,6 +50,15 @@ function applySettings(s) {
 function slideWindow(text) {
   const words = text.trim().split(/\s+/).filter(Boolean);
   return words.slice(-MAX_WORDS);
+}
+
+// Caps the in-progress translation line to its most recent words so a long chunked
+// translation (each chunk appended to the running total) can't grow into a paragraph that
+// overflows the overlay — mirrors slideWindow's role for the EN caption ticker.
+function capPendingWords(text) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= MAX_PENDING_WORDS) return text.trim();
+  return words.slice(-MAX_PENDING_WORDS).join(" ");
 }
 
 // Resize while keeping whatever bottom-left corner the window is currently at
@@ -291,6 +305,35 @@ export default function App() {
   const unlistenRefs = useRef([]);
   const clearTimer   = useRef(null);
 
+  // Queues incoming translated chunks and reveals them one at a time, each held on screen
+  // for PENDING_CHUNK_MS — without this, chunks that translate faster than a person can
+  // read (which happens constantly with the local translator) would just flash by.
+  const pendingQueueRef = useRef([]);
+  const pendingTimerRef = useRef(null);
+
+  const clearPendingQueue = () => {
+    pendingQueueRef.current = [];
+    clearTimeout(pendingTimerRef.current);
+    pendingTimerRef.current = null;
+  };
+
+  const showNextPendingChunk = () => {
+    if (pendingQueueRef.current.length === 0) {
+      pendingTimerRef.current = null;
+      return;
+    }
+    const next = pendingQueueRef.current.shift();
+    setPendingEnglish(next);
+    pendingTimerRef.current = setTimeout(showNextPendingChunk, PENDING_CHUNK_MS);
+  };
+
+  const enqueuePendingChunk = (text) => {
+    pendingQueueRef.current.push(text);
+    if (!pendingTimerRef.current) {
+      showNextPendingChunk();
+    }
+  };
+
   // Apply persisted CSS vars on mount
   useEffect(() => { applySettings(settings); }, []);
 
@@ -397,8 +440,21 @@ export default function App() {
           if (kind === "partial") {
             setJapaneseStream(text);
           } else if (kind === "streaming-en") {
-            setPendingEnglish(text);
+            enqueuePendingChunk(capPendingWords(text));
+          } else if (kind === "final-chunk") {
+            // A mid-utterance chunk finished translating (eager chunking keeps latency
+            // low on long sentences). Record it in history but leave the live caption
+            // and paced pending queue running — the utterance isn't actually over yet.
+            setTranslationHistory((h) => {
+              if (h.length > 0 && h[h.length - 1] === text) return h;
+              return [...h, text];
+            });
+          } else if (kind === "utterance-end") {
+            clearPendingQueue();
+            setPendingEnglish("");
+            setJapaneseStream("");
           } else {
+            clearPendingQueue();
             setTranslationHistory((h) => {
               if (h.length > 0 && h[h.length - 1] === text) return h;
               return [...h, text];
@@ -450,6 +506,7 @@ export default function App() {
     return () => {
       unlistenRefs.current.forEach((fn) => fn());
       clearTimeout(clearTimer.current);
+      clearPendingQueue();
     };
   }, []);
 
@@ -462,12 +519,14 @@ export default function App() {
       setWords([]);
       setCurrentJa("");
       setTranslationHistory([]);
+      clearPendingQueue();
       setPendingEnglish("");
       setJapaneseStream("");
     } else {
       setWords([]);
       setCurrentJa("");
       setTranslationHistory([]);
+      clearPendingQueue();
       setPendingEnglish("");
       setJapaneseStream("");
       setRunning(true);
@@ -475,6 +534,7 @@ export default function App() {
         mode,
         ollamaKey: settings.ollamaKey || null,
         ollamaModel: settings.ollamaModel || null,
+        useLocalTranslation: settings.useLocalTranslation,
       });
     }
   };
@@ -485,6 +545,15 @@ export default function App() {
     if (!running) {
       setMode((m) => MODES[(MODES.indexOf(m) + 1) % MODES.length]);
     }
+  };
+
+  const toggleLocalTranslation = () => {
+    if (running) return;
+    setSettings((s) => {
+      const next = { ...s, useLocalTranslation: !s.useLocalTranslation };
+      localStorage.setItem("vt_settings", JSON.stringify(next));
+      return next;
+    });
   };
 
   const openSettings = async () => {
@@ -603,9 +672,21 @@ export default function App() {
             <button
               className={liveOnly ? "btn btn--mode btn--live-active" : "btn btn--mode"}
               onClick={() => setLiveOnly((v) => !v)}
-              title={liveOnly ? "Show full translation view" : "Show only live speech text"}
+              title={liveOnly ? "Show full translation view" : "Show only live translated text"}
             >
               LIVE
+            </button>
+            <button
+              className={settings.useLocalTranslation ? "btn btn--mode btn--live-active" : "btn btn--mode"}
+              onClick={toggleLocalTranslation}
+              disabled={running}
+              title={
+                settings.useLocalTranslation
+                  ? "Using a local offline model (no Ollama) — first use downloads/loads it and may take a while"
+                  : "Using Ollama for translation"
+              }
+            >
+              TEST LOCAL
             </button>
             <span className={`dot dot--${status}`} />
           </div>
@@ -617,17 +698,34 @@ export default function App() {
 
         <div
           className={
-            liveOnly || translationHistory.length === 0 ? "ja-body ja-body--center" : "ja-body"
+            translationHistory.length === 0 ? "ja-body ja-body--center" : "ja-body"
           }
           data-tauri-drag-region
         >
           {liveOnly ? (
-            japaneseStream ? (
-              <div className="ja-live" data-tauri-drag-region>{japaneseStream}</div>
-            ) : (
+            translationHistory.length === 0 && !pendingEnglish ? (
               <span className="placeholder" data-tauri-drag-region>
                 {running ? "Listening…" : "Press ▶ to start"}
               </span>
+            ) : (
+              <>
+                <div className="ja-history" data-tauri-drag-region>
+                  {translationHistory.map((line, i) => {
+                    const isLatest = i === translationHistory.length - 1;
+                    return (
+                      <div
+                        key={i}
+                        data-tauri-drag-region
+                        className={isLatest ? "ja-history-item ja-history-item--latest" : "ja-history-item"}
+                      >
+                        {capPendingWords(line)}
+                      </div>
+                    );
+                  })}
+                  <div ref={historyEndRef} />
+                </div>
+                {pendingEnglish && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
+              </>
             )
           ) : translationHistory.length === 0 ? (
             // nothing finalized yet — center the streaming text instead of
@@ -645,19 +743,18 @@ export default function App() {
           ) : (
             <>
               <div className="ja-history" data-tauri-drag-region>
-                {translationHistory.map((line, i) => (
-                  <div
-                    key={i}
-                    data-tauri-drag-region
-                    className={
-                      i === translationHistory.length - 1
-                        ? "ja-history-item ja-history-item--latest"
-                        : "ja-history-item"
-                    }
-                  >
-                    {line}
-                  </div>
-                ))}
+                {translationHistory.map((line, i) => {
+                  const isLatest = i === translationHistory.length - 1;
+                  return (
+                    <div
+                      key={i}
+                      data-tauri-drag-region
+                      className={isLatest ? "ja-history-item ja-history-item--latest" : "ja-history-item"}
+                    >
+                      {capPendingWords(line)}
+                    </div>
+                  );
+                })}
                 <div ref={historyEndRef} />
               </div>
               {pendingEnglish && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
