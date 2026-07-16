@@ -323,18 +323,34 @@ export default function App() {
       return;
     }
     const next = pendingQueueRef.current.shift();
-    // eslint-disable-next-line no-console -- temporary latency-diagnosis instrumentation
-    console.log(
-      `[pending-queue] displaying chunk ${(performance.now() - next.enqueuedAt).toFixed(0)}ms after it was enqueued; ${pendingQueueRef.current.length} still queued behind it`
-    );
+    if (next.kind === "final") {
+      // The sentence's paced reveal has finished playing out — now commit the full
+      // translation to history and clear the live lines, then move straight on (no dwell).
+      setTranslationHistory((h) => {
+        if (h.length > 0 && h[h.length - 1] === next.text) return h;
+        return [...h, next.text];
+      });
+      setPendingEnglish("");
+      setJapaneseStream("");
+      showNextPendingChunk();
+      return;
+    }
     setPendingEnglish(next.text);
     pendingTimerRef.current = setTimeout(showNextPendingChunk, PENDING_CHUNK_MS);
   };
 
   const enqueuePendingChunk = (text) => {
-    pendingQueueRef.current.push({ text, enqueuedAt: performance.now() });
-    // eslint-disable-next-line no-console -- temporary latency-diagnosis instrumentation
-    console.log(`[pending-queue] enqueued chunk, depth now ${pendingQueueRef.current.length}`);
+    pendingQueueRef.current.push({ kind: "chunk", text });
+    if (!pendingTimerRef.current) {
+      showNextPendingChunk();
+    }
+  };
+
+  // JA mode: the backend translates whole sentences at once and streams the English out in
+  // word-chunks. The finalized line must wait its turn behind those chunks instead of
+  // wiping them off screen instantly, so it rides through the same queue.
+  const enqueueFinalLine = (text) => {
+    pendingQueueRef.current.push({ kind: "final", text });
     if (!pendingTimerRef.current) {
       showNextPendingChunk();
     }
@@ -360,6 +376,8 @@ export default function App() {
   useEffect(() => { liveOnlyRef.current = liveOnly; }, [liveOnly]);
   const settingsOpenRef = useRef(settingsOpen);
   useEffect(() => { settingsOpenRef.current = settingsOpen; }, [settingsOpen]);
+  const useLocalRef = useRef(settings.useLocalTranslation);
+  useEffect(() => { useLocalRef.current = settings.useLocalTranslation; }, [settings.useLocalTranslation]);
 
   // Programmatic resizes go through here so the manual-resize listener below
   // can tell them apart from the user dragging a window edge.
@@ -452,7 +470,14 @@ export default function App() {
           if (kind === "partial") {
             setJapaneseStream(text);
           } else if (kind === "streaming-en") {
-            enqueuePendingChunk(capPendingWords(text));
+            if (modeRef.current === "vosk-ja" && !useLocalRef.current) {
+              // Ollama streams the accumulated translation token-by-token — already a
+              // natural live ticker. Pacing those dozens of updates at 500ms each would
+              // back the queue up by half a minute, so show them directly.
+              setPendingEnglish(capPendingWords(text));
+            } else {
+              enqueuePendingChunk(capPendingWords(text));
+            }
           } else if (kind === "final-chunk") {
             // A mid-utterance chunk finished translating (eager chunking keeps latency
             // low on long sentences). Record it in history but leave the live caption
@@ -465,6 +490,12 @@ export default function App() {
             clearPendingQueue();
             setPendingEnglish("");
             setJapaneseStream("");
+          } else if (modeRef.current === "vosk-ja" && useLocalRef.current) {
+            // Local JA translates whole sentences and reveals them as paced word-chunks —
+            // the finalized line waits behind those chunks so the streaming reveal actually
+            // plays out instead of being wiped instantly. (Ollama JA commits immediately
+            // below, since its token ticker already streamed in real time.)
+            enqueueFinalLine(text);
           } else {
             clearPendingQueue();
             setTranslationHistory((h) => {

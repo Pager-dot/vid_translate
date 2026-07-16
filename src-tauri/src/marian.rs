@@ -43,9 +43,18 @@ fn build_translator(source_lang: &str) -> Result<Ct2Translator, String> {
             path.display()
         ));
     }
+    let mut config = Config::default();
+    if source_lang == "ja" {
+        // JA translates whole sentences in one call, so per-call latency matters most —
+        // give CTranslate2 most of the machine's cores, holding a few back so the Vosk
+        // decoder and UI never starve. ES keeps the default (its 8-word chunks are already
+        // short and its pipeline behavior is deliberately frozen).
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        config.num_threads_per_replica = cores.saturating_sub(4).max(4);
+    }
     eprintln!("[marian] loading local model for '{source_lang}' from {}...", path.display());
     let start = std::time::Instant::now();
-    let result = Translator::new(&path, &Config::default()).map_err(|e| format!("{e}"));
+    let result = Translator::new(&path, &config).map_err(|e| format!("{e}"));
     let elapsed = start.elapsed();
     match &result {
         Ok(_) => eprintln!("[marian] model for '{source_lang}' loaded in {elapsed:.1?}"),
@@ -105,12 +114,23 @@ pub fn translate_local_blocking(
         let despaced: String = text.split_whitespace().collect();
         eprintln!("[marian] translating 'ja' sentence: {despaced:?}");
         let start = std::time::Instant::now();
-        return match translator.translate_batch(&[despaced], &Default::default(), None) {
+        // Greedy decoding (beam_size 1) instead of the default 2-beam search: ~1.5-2x
+        // faster on long sentences for a small fluency cost — chosen deliberately for the
+        // live-caption use case where latency is worth more than occasional phrasing polish.
+        let options = ct2rs::TranslationOptions {
+            beam_size: 1,
+            ..Default::default()
+        };
+        return match translator.translate_batch(&[despaced], &options, None) {
             Ok(mut out) => {
                 let (translated, _score) = out.pop().unwrap_or_default();
                 eprintln!("[marian] sentence translated in {:.1?}: {translated:?}", start.elapsed());
-                if !translated.is_empty() {
-                    on_update(&translated);
+                // The whole sentence was translated in one call (for quality), but the
+                // English is revealed in small word-chunks so the frontend's paced queue
+                // can stream it like the ES/EN modes do — a display effect only.
+                let words: Vec<&str> = translated.split_whitespace().collect();
+                for piece in words.chunks(MAX_CHUNK_WORDS) {
+                    on_update(&piece.join(" "));
                 }
                 translated
             }
@@ -195,6 +215,9 @@ mod smoke_test {
             "そんな 残念 だ なぁ と",
             "健康 で 元気 に 仲良く 過ごし ましょう",
             "今年 の 抱負 は 何 です か",
+            // Long run-on sentence from a real session (took 1.9s with default 2-beam
+            // search and default threads) — the latency canary for the greedy+threads config.
+            "ございます よ だって ね マート そう です よ ね ちょっと 地方 に 行っ たら 家賃 も 本当 に 安く なる し 大きい アパート に 住め ます から ね 本当 に そう です ね",
         ];
         for input in vosk_style_inputs {
             let mut updates = Vec::new();
@@ -209,7 +232,9 @@ mod smoke_test {
             println!("RESULT: {result}");
             assert!(!result.is_empty());
             assert!(!result.starts_with("[translation error"));
-            assert_eq!(updates.len(), 1, "JA should translate as one whole sentence");
+            // Translated as one whole sentence, revealed as ≤8-word display pieces that
+            // must reassemble exactly into the full result.
+            assert_eq!(updates.join(" "), result);
         }
     }
 }
