@@ -62,6 +62,12 @@ jobs:
 
       - name: Build (Windows)
         if: matrix.platform == 'windows-latest'
+        env:
+          # ct2rs hardcodes the static CRT (/MT) when it CMake-builds CTranslate2, while
+          # Rust defaults to the dynamic CRT (/MD) — mixing them fails with LNK2038
+          # "RuntimeLibrary mismatch" → LNK1169. Statically link the CRT everywhere to
+          # match (also removes the VC++ redistributable requirement for end users).
+          RUSTFLAGS: -C target-feature=+crt-static
         run: npm run tauri build
 
       # linuxdeploy bundles the build machine's libwayland-client, but libEGL is NOT
