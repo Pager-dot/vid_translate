@@ -67,7 +67,10 @@ fn vosk_model_url_and_path(kind: &str) -> Result<(&'static str, std::path::PathB
             vosk_model_path(),
         )),
         "ja" => Ok((
-            "https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip",
+            // The small model (48MB) has a high enough word-error-rate on real speech
+            // (numbers, casual/fast talking) that it invents entirely different sentences —
+            // no amount of chunking/translation-side tuning can recover meaning lost here.
+            "https://alphacephei.com/vosk/models/vosk-model-ja-0.22.zip",
             vosk_ja_model_path(),
         )),
         "es" => Ok((
@@ -501,6 +504,14 @@ fn run_translated_pipeline(
     let app_for_translate = app_handle.clone();
     let stop_flag_worker = stop_flag.clone();
 
+    // Buffering/merging fragments together before translating (predicate-suffix waiting,
+    // debounce timeouts, etc.) was tried here and reverted: it sits upstream of the
+    // use_local branch below, so it silently fed both Ollama and the local model mangled,
+    // merged-together input — degrading a JA/Ollama pipeline that worked fine before any of
+    // that was added (see git history at 60432d2). Each `(text, is_utterance_end)` received
+    // here is translated immediately and independently, same as the original design: one
+    // full Vosk `Final` (or, for ES, one eagerly-cut chunk — see the STREAM_CHUNK_WORDS
+    // logic below) in, one translate call out.
     std::thread::spawn(move || {
         for (text, is_utterance_end) in rx_text {
             if stop_flag_worker.load(Ordering::Relaxed) {
@@ -590,6 +601,15 @@ fn run_translated_pipeline(
     // we also watch the growing `Partial` text and hand off words to the translator as soon
     // as STREAM_CHUNK_WORDS new ones accumulate, tracking how many words of the current
     // utterance have already been sent so `Final` only flushes the leftover remainder.
+    //
+    // This assumes a `Partial` word prefix is stable once we've eagerly sent it — true
+    // enough for ES/EN, but Vosk's own docs call partials explicitly unstable, and Japanese
+    // partials get revised far more often (kanji/word-boundary re-ranking as more audio
+    // arrives). If a prefix gets revised after we've already translated it, `Final` only
+    // sends the leftover remainder assuming the sent prefix still matches — so a correction
+    // never gets re-translated and we silently display stale, sometimes unrelated text. So
+    // JA skips eager partial-chunking entirely and only ever translates the true, stable
+    // `Final` result.
     const STREAM_CHUNK_WORDS: usize = 8;
     let mut sent_word_count: usize = 0;
     let result = recognizer::run(
@@ -599,13 +619,13 @@ fn run_translated_pipeline(
             use recognizer::RecognitionResult::*;
             match ev {
                 Partial(text) => {
-                    let words: Vec<&str> = text.split_whitespace().collect();
-                    if words.len() >= sent_word_count + STREAM_CHUNK_WORDS {
-                        let hard_cutoff = sent_word_count + STREAM_CHUNK_WORDS;
-                        let cut = find_break_point(&words, sent_word_count, hard_cutoff, source_lang);
-                        let chunk = words[sent_word_count..cut].join(" ");
-                        sent_word_count = cut;
-                        if !is_ja || is_japanese_text(&chunk) {
+                    if !is_ja {
+                        let words: Vec<&str> = text.split_whitespace().collect();
+                        if words.len() >= sent_word_count + STREAM_CHUNK_WORDS {
+                            let hard_cutoff = sent_word_count + STREAM_CHUNK_WORDS;
+                            let cut = find_break_point(&words, sent_word_count, hard_cutoff, source_lang);
+                            let chunk = words[sent_word_count..cut].join(" ");
+                            sent_word_count = cut;
                             let _ = tx_text.send((chunk, false));
                         }
                     }

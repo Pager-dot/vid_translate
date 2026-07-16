@@ -738,7 +738,7 @@ export default function App() {
                         data-tauri-drag-region
                         className={isLatest ? "ja-history-item ja-history-item--latest" : "ja-history-item"}
                       >
-                        {capPendingWords(line)}
+                        {isEs ? capPendingWords(line) : line}
                       </div>
                     );
                   })}
@@ -771,7 +771,7 @@ export default function App() {
                       data-tauri-drag-region
                       className={isLatest ? "ja-history-item ja-history-item--latest" : "ja-history-item"}
                     >
-                      {capPendingWords(line)}
+                      {isEs ? capPendingWords(line) : line}
                     </div>
                   );
                 })}

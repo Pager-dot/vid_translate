@@ -22,10 +22,12 @@ pub struct MarianState {
 /// CLI, which isn't something we can ship inside (or invoke from) the Tauri app. Each
 /// directory is produced once, offline, via:
 ///
-///   ct2-transformers-converter --model Helsinki-NLP/opus-mt-ja-en \
+///   ct2-transformers-converter --model staka/fugumt-ja-en \
 ///       --output_dir ct2-model-ja --quantization int8 --copy_files source.spm target.spm
 ///
-/// (swap `ja` for `es` / `opus-mt-es-en` for Spanish), then copied into place here.
+/// (fugumt-ja-en beat Helsinki-NLP/opus-mt-ja-en head-to-head on real fragments — clearly
+/// better on some, e.g. greetings, worse on a few, net improvement. For Spanish, swap `ja`
+/// for `es` / the model for `Helsinki-NLP/opus-mt-es-en`), then copied into place here.
 fn model_path(source_lang: &str) -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -52,18 +54,23 @@ fn build_translator(source_lang: &str) -> Result<Ct2Translator, String> {
     result
 }
 
-/// Source text is split into chunks of at most this many words before translating, so one
-/// long recognized sentence can't turn into one long, slow `translate_batch` call. Each
-/// chunk is translated separately and the results are joined, which also restores a real
-/// incremental "streaming" feel (`on_update` fires after every chunk) and gives natural
+/// ES only: source text is split into chunks of at most this many words before translating,
+/// so one long recognized sentence can't turn into one long, slow `translate_batch` call.
+/// Each chunk is translated separately and the results are joined, which also restores a
+/// real incremental "streaming" feel (`on_update` fires after every chunk) and gives natural
 /// points to check `stop_flag` mid-sentence. Tradeoff: translating in isolated chunks can
 /// occasionally read less fluently than translating the whole sentence at once, since each
 /// chunk loses full-sentence context — acceptable given the latency this fixes.
+///
+/// Japanese deliberately skips this: Vosk's JA "words" are morphemes, not words, so an
+/// 8-token chunk is a tiny context-free fragment the model can only mistranslate. JA only
+/// translates on Vosk `Final` (whole stable sentences), so there's no latency problem to
+/// chunk away in the first place.
 const MAX_CHUNK_WORDS: usize = 8;
 
 /// Translates one sentence through a local, offline, int8-quantized CTranslate2 model
-/// (dedicated Helsinki-NLP opus-mt-ja-en / opus-mt-es-en models — small and fast, unlike
-/// the earlier rust-bert/M2M100 attempt).
+/// (dedicated staka/fugumt-ja-en / Helsinki-NLP opus-mt-es-en models — small and fast,
+/// unlike the earlier rust-bert/M2M100 attempt).
 pub fn translate_local_blocking(
     source_lang: &str,
     text: &str,
@@ -89,6 +96,30 @@ pub fn translate_local_blocking(
         }
     }
     let translator = guard.as_ref().unwrap();
+
+    if source_lang == "ja" {
+        // Whole sentence, one call — and with Vosk's artificial inter-morpheme spaces
+        // stripped: the model was trained on natural unspaced Japanese, and spaced input
+        // tokenizes out-of-distribution ("▁を ▁食べ" instead of "を 食べ"), degrading
+        // quality even on otherwise correct transcriptions.
+        let despaced: String = text.split_whitespace().collect();
+        eprintln!("[marian] translating 'ja' sentence: {despaced:?}");
+        let start = std::time::Instant::now();
+        return match translator.translate_batch(&[despaced], &Default::default(), None) {
+            Ok(mut out) => {
+                let (translated, _score) = out.pop().unwrap_or_default();
+                eprintln!("[marian] sentence translated in {:.1?}: {translated:?}", start.elapsed());
+                if !translated.is_empty() {
+                    on_update(&translated);
+                }
+                translated
+            }
+            Err(e) => {
+                eprintln!("[marian] translate() error after {:.1?}: {e}", start.elapsed());
+                format!("[translation error: {e}]")
+            }
+        };
+    }
 
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut accumulated = String::new();
@@ -156,18 +187,30 @@ mod smoke_test {
     fn translates_japanese() {
         let state = MarianState::default();
         let stop_flag = AtomicBool::new(false);
-        let mut updates = Vec::new();
-        let result = translate_local_blocking(
-            "ja",
-            "こんにちは、元気ですか？",
-            &stop_flag,
-            &state,
-            |partial| updates.push(partial.to_string()),
-        );
-        println!("RESULT: {result}");
-        println!("UPDATES: {updates:?}");
-        assert!(!result.is_empty());
-        assert!(!result.starts_with("[translation error"));
+        // Space-separated morphemes, exactly the shape Vosk's JA recognizer emits — the
+        // de-space + whole-sentence path must handle these, not just natural written JA.
+        let vosk_style_inputs = [
+            "こんにちは 、 元気 です か ？",
+            "小 学校 です",
+            "そんな 残念 だ なぁ と",
+            "健康 で 元気 に 仲良く 過ごし ましょう",
+            "今年 の 抱負 は 何 です か",
+        ];
+        for input in vosk_style_inputs {
+            let mut updates = Vec::new();
+            let result = translate_local_blocking(
+                "ja",
+                input,
+                &stop_flag,
+                &state,
+                |partial| updates.push(partial.to_string()),
+            );
+            println!("INPUT:  {input}");
+            println!("RESULT: {result}");
+            assert!(!result.is_empty());
+            assert!(!result.starts_with("[translation error"));
+            assert_eq!(updates.len(), 1, "JA should translate as one whole sentence");
+        }
     }
 }
 
