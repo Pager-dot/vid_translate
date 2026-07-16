@@ -323,12 +323,18 @@ export default function App() {
       return;
     }
     const next = pendingQueueRef.current.shift();
-    setPendingEnglish(next);
+    // eslint-disable-next-line no-console -- temporary latency-diagnosis instrumentation
+    console.log(
+      `[pending-queue] displaying chunk ${(performance.now() - next.enqueuedAt).toFixed(0)}ms after it was enqueued; ${pendingQueueRef.current.length} still queued behind it`
+    );
+    setPendingEnglish(next.text);
     pendingTimerRef.current = setTimeout(showNextPendingChunk, PENDING_CHUNK_MS);
   };
 
   const enqueuePendingChunk = (text) => {
-    pendingQueueRef.current.push(text);
+    pendingQueueRef.current.push({ text, enqueuedAt: performance.now() });
+    // eslint-disable-next-line no-console -- temporary latency-diagnosis instrumentation
+    console.log(`[pending-queue] enqueued chunk, depth now ${pendingQueueRef.current.length}`);
     if (!pendingTimerRef.current) {
       showNextPendingChunk();
     }
@@ -337,9 +343,15 @@ export default function App() {
   // Apply persisted CSS vars on mount
   useEffect(() => { applySettings(settings); }, []);
 
-  // Auto-scroll JA history
+  // Auto-scroll JA history. Eager chunking can push new lines in quick succession — a
+  // "smooth" scrollIntoView call gets interrupted by the next one before finishing, so it
+  // can visibly stall short of the bottom. Setting scrollTop directly is instant and each
+  // call always lands exactly at the bottom regardless of how fast the next one follows.
   useEffect(() => {
-    historyEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = historyEndRef.current?.parentElement;
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+    }
   }, [translationHistory]);
 
   const modeRef = useRef(mode);
@@ -650,6 +662,14 @@ export default function App() {
   // ── JA / ES translation mode ────────────────────────────────────────────────
   if (mode === "vosk-ja" || mode === "vosk-es") {
     const isEs = mode === "vosk-es";
+    // A "final-chunk" pushes its text into history but deliberately leaves the pending
+    // queue/display running (the utterance isn't over yet). If that chunk was the one
+    // currently on screen, it now reads as both the bold "latest" history line and the
+    // pending line right below it — same words twice. Hide the duplicate.
+    const latestHistoryLine = translationHistory.length
+      ? capPendingWords(translationHistory[translationHistory.length - 1])
+      : "";
+    const showPending = pendingEnglish && pendingEnglish !== latestHistoryLine;
     return (
       <div className="bar bar--ja" data-tauri-drag-region>
         <div className="bar-top" data-tauri-drag-region>
@@ -724,7 +744,7 @@ export default function App() {
                   })}
                   <div ref={historyEndRef} />
                 </div>
-                {pendingEnglish && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
+                {showPending && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
               </>
             )
           ) : translationHistory.length === 0 ? (
@@ -732,7 +752,7 @@ export default function App() {
             // pinning it under an empty history area
             pendingEnglish || japaneseStream ? (
               <>
-                {pendingEnglish && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
+                {showPending && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
                 {japaneseStream && <div className="ja-japanese" data-tauri-drag-region>{japaneseStream}</div>}
               </>
             ) : (

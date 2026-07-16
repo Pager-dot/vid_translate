@@ -429,6 +429,47 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
     }
 }
 
+/// Eager fixed-word-count chunking gives low latency but has no regard for grammar, so a
+/// hard cutoff can land mid-phrase (e.g. splitting "vamos a ir a almorzar | a un sitio" right
+/// on a dangling preposition). Given a hard word-count cutoff, this looks a few words
+/// backward for a better place to break — before a connector in ES (prepositions/conjunctions
+/// naturally lead the next clause), or after a particle in JA (particles conclude the clause
+/// they attach to, the opposite direction). Falls back to the hard cutoff if nothing suitable
+/// is found in the lookback window, so this never delays a chunk beyond the original cap.
+fn find_break_point(words: &[&str], start: usize, hard_cutoff: usize, source_lang: &str) -> usize {
+    const LOOKBACK: usize = 3;
+    let window_start = hard_cutoff.saturating_sub(LOOKBACK).max(start + 1);
+
+    match source_lang {
+        "es" => {
+            const CONNECTORS: &[&str] = &[
+                "a", "al", "de", "del", "que", "y", "o", "u", "pero", "porque", "para", "con",
+                "en", "por", "si", "como", "cuando", "aunque", "pues", "sino",
+            ];
+            for i in (window_start..hard_cutoff).rev() {
+                let w = words[i]
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                if CONNECTORS.contains(&w.as_str()) {
+                    return i; // cut before this connector — it leads the next chunk
+                }
+            }
+        }
+        "ja" => {
+            const PARTICLES: &[&str] = &[
+                "が", "けど", "から", "ので", "そして", "でも", "しかし", "し", "たら", "れば",
+            ];
+            for i in (window_start..hard_cutoff).rev() {
+                if PARTICLES.iter().any(|p| words[i].ends_with(p)) {
+                    return i + 1; // cut after this particle — it concludes the clause
+                }
+            }
+        }
+        _ => {}
+    }
+    hard_cutoff
+}
+
 fn is_japanese_text(text: &str) -> bool {
     text.chars().any(|c| {
         ('\u{3040}'..='\u{309F}').contains(&c) || // hiragana
@@ -560,8 +601,10 @@ fn run_translated_pipeline(
                 Partial(text) => {
                     let words: Vec<&str> = text.split_whitespace().collect();
                     if words.len() >= sent_word_count + STREAM_CHUNK_WORDS {
-                        let chunk = words[sent_word_count..].join(" ");
-                        sent_word_count = words.len();
+                        let hard_cutoff = sent_word_count + STREAM_CHUNK_WORDS;
+                        let cut = find_break_point(&words, sent_word_count, hard_cutoff, source_lang);
+                        let chunk = words[sent_word_count..cut].join(" ");
+                        sent_word_count = cut;
                         if !is_ja || is_japanese_text(&chunk) {
                             let _ = tx_text.send((chunk, false));
                         }
