@@ -2,8 +2,17 @@ use ct2rs::{Config, Translator};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Mutex, OnceLock,
 };
+
+/// Tauri's bundled-resource directory, set once at app startup. The quantized models ship
+/// inside the installer (see `bundle.resources` in tauri.conf.json / tauri.linux.conf.json),
+/// so end users get local translation with zero downloads or manual setup.
+static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_resource_dir(dir: PathBuf) {
+    let _ = RESOURCE_DIR.set(dir);
+}
 
 type Ct2Translator = Translator<ct2rs::tokenizers::auto::Tokenizer>;
 
@@ -17,6 +26,10 @@ pub struct MarianState {
 
 /// Where the offline-converted CTranslate2 model directory lives for a given language.
 ///
+/// Preferred location is the app's bundled resources (shipped inside the AppImage/MSI —
+/// nothing for the end user to download), with the user data directory as a fallback so
+/// dev builds and manual model overrides keep working.
+///
 /// Unlike the Vosk models, these can't be downloaded and converted at runtime: producing
 /// them requires Python + `transformers` + `ctranslate2` and the `ct2-transformers-converter`
 /// CLI, which isn't something we can ship inside (or invoke from) the Tauri app. Each
@@ -27,12 +40,20 @@ pub struct MarianState {
 ///
 /// (fugumt-ja-en beat Helsinki-NLP/opus-mt-ja-en head-to-head on real fragments — clearly
 /// better on some, e.g. greetings, worse on a few, net improvement. For Spanish, swap `ja`
-/// for `es` / the model for `Helsinki-NLP/opus-mt-es-en`), then copied into place here.
+/// for `es` / the model for `Helsinki-NLP/opus-mt-es-en`), then committed under
+/// src-tauri/resources/ so the bundler picks them up.
 fn model_path(source_lang: &str) -> PathBuf {
+    let name = format!("ct2-model-{source_lang}");
+    if let Some(resource_dir) = RESOURCE_DIR.get() {
+        let bundled = resource_dir.join(&name);
+        if bundled.exists() {
+            return bundled;
+        }
+    }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("vid_translate")
-        .join(format!("ct2-model-{source_lang}"))
+        .join(name)
 }
 
 fn build_translator(source_lang: &str) -> Result<Ct2Translator, String> {

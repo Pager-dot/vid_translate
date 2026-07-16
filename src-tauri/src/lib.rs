@@ -755,6 +755,12 @@ fn pull_model(app: tauri::AppHandle, model: String) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            if let Ok(dir) = app.path().resource_dir() {
+                marian::set_resource_dir(dir);
+            }
+            Ok(())
+        })
         .manage(Mutex::new(PipelineState::default()))
         .manage(marian::MarianState::default())
         .invoke_handler(tauri::generate_handler![

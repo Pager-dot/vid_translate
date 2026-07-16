@@ -2,7 +2,9 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "resources": {
-      "vendor/linux-x86_64/libvosk.so": "libvosk.so"
+      "vendor/linux-x86_64/libvosk.so": "libvosk.so",
+      "resources/ct2-model-ja/*": "ct2-model-ja/",
+      "resources/ct2-model-es/*": "ct2-model-es/"
     }
   }
 }
