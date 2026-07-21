@@ -298,6 +298,7 @@ export default function App() {
   const [liveOnly, setLiveOnly]           = useState(false);
   const [settingsOpen, setSettingsOpen]   = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(null); // { kind, status, downloaded, total, error }
+  const [ct2DownloadProgress, setCt2DownloadProgress] = useState(null); // same shape, local translation models
 
   const [settings, setSettings] = useState(loadSettings);
   const [draft, setDraft]       = useState(settings);
@@ -526,8 +527,13 @@ export default function App() {
 
       const unlistenStatus = await listen("status", (event) => {
         setStatus(event.payload.state);
-        if (["model_missing", "vosk_ja_model_missing", "vosk_es_model_missing"]
-            .includes(event.payload.state)) {
+        if ([
+          "model_missing",
+          "vosk_ja_model_missing",
+          "vosk_es_model_missing",
+          "ct2_ja_model_missing",
+          "ct2_es_model_missing",
+        ].includes(event.payload.state)) {
           setRunning(false);
         }
       });
@@ -542,7 +548,17 @@ export default function App() {
         }
       });
 
-      unlistenRefs.current = [unlistenTx, unlistenStatus, unlistenDownload];
+      const unlistenCt2Download = await listen("ct2_download_progress", (event) => {
+        setCt2DownloadProgress(event.payload);
+        if (event.payload.status === "done") {
+          setTimeout(() => {
+            setCt2DownloadProgress(null);
+            toggleRef.current();
+          }, 400);
+        }
+      });
+
+      unlistenRefs.current = [unlistenTx, unlistenStatus, unlistenDownload, unlistenCt2Download];
     };
 
     setupListeners();
@@ -653,22 +669,29 @@ export default function App() {
 
   // ── Setup screens: model missing → one-click auto-download, no manual steps ──
   const MISSING_MODEL_KIND = {
-    model_missing: { kind: "en", label: "English" },
-    vosk_ja_model_missing: { kind: "ja", label: "Japanese" },
-    vosk_es_model_missing: { kind: "es", label: "Spanish" },
+    model_missing: { kind: "en", label: "English speech", type: "vosk" },
+    vosk_ja_model_missing: { kind: "ja", label: "Japanese speech", type: "vosk" },
+    vosk_es_model_missing: { kind: "es", label: "Spanish speech", type: "vosk" },
+    ct2_ja_model_missing: { kind: "ja", label: "Japanese local translation", type: "ct2" },
+    ct2_es_model_missing: { kind: "es", label: "Spanish local translation", type: "ct2" },
   };
 
   if (MISSING_MODEL_KIND[status]) {
-    const { kind, label } = MISSING_MODEL_KIND[status];
-    const dl = downloadProgress && downloadProgress.kind === kind ? downloadProgress : null;
+    const { kind, label, type } = MISSING_MODEL_KIND[status];
+    const progressState = type === "ct2" ? ct2DownloadProgress : downloadProgress;
+    const dl = progressState && progressState.kind === kind ? progressState : null;
     const pct = dl && dl.total ? Math.round((dl.downloaded / dl.total) * 100) : null;
+    const startDownload = () =>
+      type === "ct2"
+        ? invoke("download_ct2_model", { lang: kind })
+        : invoke("download_vosk_model", { kind });
 
     return (
       <div className="bar bar--setup" data-tauri-drag-region>
         {!dl && (
           <>
-            <span className="setup-text">{label} speech model not downloaded yet.</span>
-            <button className="btn" onClick={() => invoke("download_vosk_model", { kind })}>
+            <span className="setup-text">{label} model not downloaded yet.</span>
+            <button className="btn" onClick={startDownload}>
               Download
             </button>
           </>
@@ -681,7 +704,7 @@ export default function App() {
         {dl && dl.status === "error" && (
           <>
             <span className="setup-text">Download failed: {dl.error}</span>
-            <button className="btn" onClick={() => invoke("download_vosk_model", { kind })}>
+            <button className="btn" onClick={startDownload}>
               Retry
             </button>
           </>

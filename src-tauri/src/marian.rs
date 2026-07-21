@@ -2,17 +2,14 @@ use ct2rs::{Config, Translator};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex, OnceLock,
+    Mutex,
 };
 
-/// Tauri's bundled-resource directory, set once at app startup. The quantized models ship
-/// inside the installer (see `bundle.resources` in tauri.conf.json / tauri.linux.conf.json),
-/// so end users get local translation with zero downloads or manual setup.
-static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-pub fn set_resource_dir(dir: PathBuf) {
-    let _ = RESOURCE_DIR.set(dir);
-}
+/// Hugging Face repo hosting the quantized CTranslate2 models — see `download_ct2_model` in
+/// lib.rs, which downloads the fixed file set listed in `CT2_MODEL_FILES` on demand.
+pub const CT2_MODEL_REPO: &str = "Pager-dot/vid-translate-ct2-models";
+pub const CT2_MODEL_FILES: &[&str] =
+    &["config.json", "model.bin", "shared_vocabulary.json", "source.spm", "target.spm"];
 
 type Ct2Translator = Translator<ct2rs::tokenizers::auto::Tokenizer>;
 
@@ -24,43 +21,39 @@ pub struct MarianState {
     es: Mutex<Option<Ct2Translator>>,
 }
 
-/// Where the offline-converted CTranslate2 model directory lives for a given language.
+/// Where the offline-converted CTranslate2 model directory lives for a given language, in
+/// the app's user data directory. Downloaded on demand from `CT2_MODEL_REPO` the first time
+/// a user turns on TEST LOCAL (see `download_ct2_model` in lib.rs) — nothing to bundle,
+/// nothing to manually convert.
 ///
-/// Preferred location is the app's bundled resources (shipped inside the AppImage/MSI —
-/// nothing for the end user to download), with the user data directory as a fallback so
-/// dev builds and manual model overrides keep working.
-///
-/// Unlike the Vosk models, these can't be downloaded and converted at runtime: producing
-/// them requires Python + `transformers` + `ctranslate2` and the `ct2-transformers-converter`
-/// CLI, which isn't something we can ship inside (or invoke from) the Tauri app. Each
-/// directory is produced once, offline, via:
+/// The models themselves are produced once, offline, via:
 ///
 ///   ct2-transformers-converter --model staka/fugumt-ja-en \
 ///       --output_dir ct2-model-ja --quantization int8 --copy_files source.spm target.spm
 ///
 /// (fugumt-ja-en beat Helsinki-NLP/opus-mt-ja-en head-to-head on real fragments — clearly
 /// better on some, e.g. greetings, worse on a few, net improvement. For Spanish, swap `ja`
-/// for `es` / the model for `Helsinki-NLP/opus-mt-es-en`), then committed under
-/// src-tauri/resources/ so the bundler picks them up.
-fn model_path(source_lang: &str) -> PathBuf {
-    let name = format!("ct2-model-{source_lang}");
-    if let Some(resource_dir) = RESOURCE_DIR.get() {
-        let bundled = resource_dir.join(&name);
-        if bundled.exists() {
-            return bundled;
-        }
-    }
+/// for `es` / the model for `Helsinki-NLP/opus-mt-es-en`), then uploaded to CT2_MODEL_REPO.
+pub fn model_path(source_lang: &str) -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("vid_translate")
-        .join(name)
+        .join(format!("ct2-model-{source_lang}"))
+}
+
+/// True once every file of the model is present (checked by the frontend before starting a
+/// TEST LOCAL session, so a missing model shows a download prompt instead of a translation
+/// error mid-session).
+pub fn is_model_downloaded(source_lang: &str) -> bool {
+    let dir = model_path(source_lang);
+    CT2_MODEL_FILES.iter().all(|f| dir.join(f).exists())
 }
 
 fn build_translator(source_lang: &str) -> Result<Ct2Translator, String> {
     let path = model_path(source_lang);
-    if !path.exists() {
+    if !is_model_downloaded(source_lang) {
         return Err(format!(
-            "no local model found at {} — see marian.rs for the one-time offline conversion command",
+            "no local model found at {} — it should have been downloaded before starting; try toggling TEST LOCAL again",
             path.display()
         ));
     }

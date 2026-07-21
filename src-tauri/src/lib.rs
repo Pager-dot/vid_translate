@@ -267,6 +267,125 @@ fn download_vosk_model(app: tauri::AppHandle, kind: String) {
     });
 }
 
+/// Downloads a quantized CTranslate2 translation model from Hugging Face (see
+/// `marian::CT2_MODEL_REPO`) directly into place — no zip/extract step, just the fixed set
+/// of files a model directory needs. Emits "ct2_download_progress" events for the setup UI,
+/// same shape as the Vosk downloader.
+#[tauri::command]
+fn download_ct2_model(app: tauri::AppHandle, lang: String) {
+    std::thread::spawn(move || {
+        let emit = |status: &str, downloaded: Option<u64>, total: Option<u64>, error: Option<String>| {
+            let _ = app.emit(
+                "ct2_download_progress",
+                ModelDownloadProgress {
+                    kind: lang.clone(),
+                    status: status.into(),
+                    downloaded,
+                    total,
+                    error,
+                },
+            );
+        };
+
+        if lang != "ja" && lang != "es" {
+            emit("error", None, None, Some(format!("unknown local model language: {lang}")));
+            return;
+        }
+
+        emit("downloading", Some(0), None, None);
+
+        // Fetch sizes upfront (cheap HEAD requests) so the progress bar has a real total
+        // across all 5 files instead of resetting per-file.
+        let mut file_sizes = Vec::with_capacity(marian::CT2_MODEL_FILES.len());
+        for filename in marian::CT2_MODEL_FILES {
+            let url = format!(
+                "https://huggingface.co/{}/resolve/main/ct2-model-{lang}/{filename}",
+                marian::CT2_MODEL_REPO
+            );
+            let size = match ureq::head(&url).call() {
+                Ok(r) => r.header("Content-Length").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
+                Err(e) => {
+                    emit("error", None, None, Some(format!("could not reach model host for {filename}: {e}")));
+                    return;
+                }
+            };
+            file_sizes.push(size);
+        }
+        let total: u64 = file_sizes.iter().sum();
+
+        let tmp_dir = std::env::temp_dir().join(format!("vid_translate_ct2_dl_{lang}"));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
+            emit("error", None, None, Some(format!("cannot create temp dir: {e}")));
+            return;
+        }
+
+        let mut downloaded: u64 = 0;
+        for filename in marian::CT2_MODEL_FILES {
+            let url = format!(
+                "https://huggingface.co/{}/resolve/main/ct2-model-{lang}/{filename}",
+                marian::CT2_MODEL_REPO
+            );
+            let resp = match ureq::get(&url).call() {
+                Ok(r) => r,
+                Err(e) => {
+                    emit("error", None, None, Some(format!("download failed for {filename}: {e}")));
+                    return;
+                }
+            };
+            let mut reader = resp.into_reader();
+            let mut file = match std::fs::File::create(tmp_dir.join(filename)) {
+                Ok(f) => f,
+                Err(e) => {
+                    emit("error", None, None, Some(format!("cannot create temp file: {e}")));
+                    return;
+                }
+            };
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = match reader.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        emit("error", None, None, Some(format!("download error: {e}")));
+                        return;
+                    }
+                };
+                if n == 0 {
+                    break;
+                }
+                if let Err(e) = file.write_all(&buf[..n]) {
+                    emit("error", None, None, Some(format!("write error: {e}")));
+                    return;
+                }
+                downloaded += n as u64;
+                emit("downloading", Some(downloaded), Some(total), None);
+            }
+        }
+
+        let target_dir = marian::model_path(&lang);
+        if let Some(parent) = target_dir.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::remove_dir_all(&target_dir);
+        if std::fs::rename(&tmp_dir, &target_dir).is_err() {
+            if let Err(e) = copy_dir_recursive(&tmp_dir, &target_dir) {
+                emit("error", None, None, Some(format!("cannot move model into place: {e}")));
+                return;
+            }
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+        }
+
+        emit("done", None, None, None);
+    });
+}
+
+/// Whether a local CTranslate2 model has already been downloaded, so the frontend can show
+/// a download prompt instead of finding out mid-translation.
+#[tauri::command]
+fn local_model_exists(lang: String) -> bool {
+    marian::is_model_downloaded(&lang)
+}
+
 /// Streams a single-shot translation from Ollama (cloud if a key is given, else local
 /// http://localhost:11434). Calls `on_update` with the accumulated translation as tokens
 /// arrive, checking `stop_flag` between chunks so a mid-request Stop feels instant.
@@ -681,6 +800,10 @@ fn run_vosk_es_pipeline(
         let _ = app_handle.emit("status", StatusEvent { state: "vosk_es_model_missing".into() });
         return;
     }
+    if use_local && !marian::is_model_downloaded("es") {
+        let _ = app_handle.emit("status", StatusEvent { state: "ct2_es_model_missing".into() });
+        return;
+    }
     run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, es_path, "es", use_local);
 }
 
@@ -694,6 +817,10 @@ fn run_vosk_ja_pipeline(
     let ja_path = vosk_ja_model_path();
     if !ja_path.exists() {
         let _ = app_handle.emit("status", StatusEvent { state: "vosk_ja_model_missing".into() });
+        return;
+    }
+    if use_local && !marian::is_model_downloaded("ja") {
+        let _ = app_handle.emit("status", StatusEvent { state: "ct2_ja_model_missing".into() });
         return;
     }
     run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, ja_path, "ja", use_local);
@@ -755,12 +882,6 @@ fn pull_model(app: tauri::AppHandle, model: String) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            if let Ok(dir) = app.path().resource_dir() {
-                marian::set_resource_dir(dir);
-            }
-            Ok(())
-        })
         .manage(Mutex::new(PipelineState::default()))
         .manage(marian::MarianState::default())
         .invoke_handler(tauri::generate_handler![
@@ -768,6 +889,8 @@ pub fn run() {
             stop_listening,
             pull_model,
             download_vosk_model,
+            download_ct2_model,
+            local_model_exists,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
