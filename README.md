@@ -263,6 +263,26 @@ Linux and Windows can tap the system output mix directly. macOS offers no such A
 
 If no loopback device is installed, the app shows a setup screen with a link to BlackHole and a **Use microphone** button, which falls back to capturing the default input instead. macOS will ask for microphone permission on the first capture either way — a loopback device is an input device as far as the OS is concerned.
 
+**Terminal-only setup (optional)** — no GUI needed for either step:
+
+```bash
+brew install blackhole-2ch   # asks for your admin password (it's a .pkg installer)
+sudo killall coreaudiod      # installer says "reboot required" — restarting coreaudiod suffices
+```
+
+The Multi-Output Device can also be created programmatically instead of via Audio MIDI Setup — it is just a "stacked" CoreAudio aggregate device (`AudioHardwareCreateAggregateDevice`); see the macOS notes in `HANDOFF.md` for the exact recipe.
+
+**Good to know:**
+
+- While a Multi-Output Device is the system output, the **keyboard volume keys are disabled** — macOS cannot control an aggregate device's volume. Adjust volume in the app that's playing, or switch output back when you're done captioning.
+- **Undoing it all:** switch output back to your speakers (System Settings → Sound), delete the Multi-Output Device in Audio MIDI Setup (select it → **–**), then remove the driver:
+
+  ```bash
+  sudo rm -rf /Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver && sudo killall coreaudiod
+  ```
+
+  That single folder is the entire install — BlackHole ships no kernel extensions, launch agents, or background processes.
+
 ---
 
 ## ⚙️ Settings
