@@ -226,6 +226,46 @@ recordable input. `start_listening` calls `audio::loopback_device_name()` first 
 `status: "audio_setup_missing"` if none is found, which the frontend turns into a setup
 screen with a BlackHole link and a **Use microphone** fallback button. Without that
 pre-flight check a session would "run" and silently transcribe nothing forever.
+(The one *native* route to system audio is ScreenCaptureKit on macOS 13+ — but it lives in
+the screen-recording framework, so it demands the **Screen Recording** permission, which is
+why this app sticks to the driver + microphone-permission-only approach.)
+
+**BlackHole can be installed with zero GUI steps — but not from a non-interactive shell.**
+`brew install blackhole-2ch` runs a `.pkg` through `sudo`, which dies with "a terminal is
+required to read the password" in any shell without a TTY (CI, agents, scripts). The
+workaround is to fetch the pkg and hand it to macOS's GUI authorization dialog, which
+prompts the logged-in user directly:
+
+```bash
+brew fetch --cask blackhole-2ch
+pkg=$(find "$(brew --cache)/downloads" -name '*BlackHole2ch*.pkg' | head -1)
+osascript -e "do shell script \"/usr/sbin/installer -pkg '$pkg' -target / && killall coreaudiod\" with administrator privileges"
+```
+
+Two gotchas: the installer claims a reboot is required — `killall coreaudiod` suffices
+(coreaudiod respawns and loads the driver immediately). And when the cask's sudo step
+fails, Homebrew *purges its registration*, so a later direct `installer` run leaves
+`brew uninstall` thinking nothing is installed — revert with
+`sudo rm -rf /Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver && sudo killall coreaudiod`
+(that folder is the entire install; there are no kexts or launch agents).
+
+**The Multi-Output Device is scriptable too.** What Audio MIDI Setup calls a Multi-Output
+Device is just a CoreAudio aggregate with `"stacked": 1`. Create it with
+`AudioHardwareCreateAggregateDevice` using the raw dictionary keys (the SDK constant names
+have churned across releases; the string literals have not):
+
+```
+{ "name": "...", "uid": "<unique>", "stacked": 1,
+  "master": <speakers UID>,                       // real output = clock master
+  "subdevices": [ { "uid": <speakers UID> },
+                  { "uid": <BlackHole UID>, "drift": 1 } ] }   // drift-correct BlackHole
+```
+
+then point `kAudioHardwarePropertyDefaultOutputDevice` at the returned device ID. The user
+keeps hearing audio while BlackHole carries the copy. Known macOS limitation, not a bug:
+while any aggregate is the default output, the **keyboard volume keys stop working** —
+aggregates expose no master volume control. Revert = set the default output back and
+`AudioHardwareDestroyAggregateDevice` (or delete it in Audio MIDI Setup).
 
 **`libvosk.dylib` is fetched, not committed.** `scripts/fetch-libvosk-macos.sh` pulls
 Vosk's `universal2` wheel from PyPI (`vosk/libvosk.dyld` inside — note the odd `.dyld`
@@ -298,4 +338,4 @@ streaming feel while still producing English output.
 |-------|-------|
 | Model loads twice on rapid start/stop | `drop(h)` doesn't wait for the thread; rapid toggle can start a new Vosk load before the old one exits. Fix: `h.join()` with a timeout, or a proper cancellation token. |
 | Vosk logs to stderr | `LOG (VoskAPI:...)` lines appear in the terminal. Suppress by redirecting stderr in the Vosk init, or setting `VOSK_LOG_LEVEL=0` env var. |
-| macOS loopback setup is manual | The user has to install BlackHole and build a Multi-Output Device by hand. A guided flow, or switching to ScreenCaptureKit (macOS 13+) for driver-free system-audio capture, would remove the step entirely. |
+| macOS loopback setup is manual | The user has to install BlackHole and build a Multi-Output Device by hand. Both steps are scriptable (see "macOS specifics" above: GUI-authorized pkg install + `AudioHardwareCreateAggregateDevice`), so an in-app guided flow could automate them. Alternatively, ScreenCaptureKit (macOS 13+) captures system audio driver-free, but requires the Screen Recording permission. |
