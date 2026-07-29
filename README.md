@@ -233,9 +233,18 @@ bash scripts/fetch-libvosk-macos.sh     # once — downloads libvosk.dylib into 
 npx tauri build --bundles app
 ```
 
-`libvosk.dylib` is copied into `VidTranslate.app/Contents/Frameworks` (via `tauri.macos.conf.json`) and found at runtime through the `@executable_path/../Frameworks` rpath embedded by `build.rs` — no Homebrew or system-wide Vosk install needed.
+`libvosk.dylib` is copied into `VidTranslate.app/Contents/Frameworks` (via `tauri.macos.conf.json`) and found at runtime through the `@executable_path/../Frameworks` rpath embedded by `build.rs` — no Homebrew or system-wide Vosk install needed. The fetch script pulls Vosk's `universal2` build (x86_64 + arm64) and hard-fails if the arm64 slice is missing.
 
-Builds are per-architecture, not universal: `ct2rs` CMake-builds CTranslate2 for the host arch only, so CI runs one job on Apple Silicon and one on Intel.
+**Requires macOS 11 (Big Sur) or later** — Apple Silicon does not exist below 11.0, so that is the floor for both architectures.
+
+Releases ship **two** DMGs, split by architecture, not by chip generation:
+
+| Download | Runs on |
+|---|---|
+| `VidTranslate_<version>_aarch64.dmg` | **All** Apple Silicon Macs — M1, M2, M3, M4, including Pro/Max/Ultra |
+| `VidTranslate_<version>_x86_64.dmg` | Intel Macs |
+
+There is no universal binary because `ct2rs` CMake-builds CTranslate2 for the host arch only, so CI runs one job on Apple Silicon and one on Intel. Both are baseline builds (no `-mcpu=native`), so the Apple Silicon DMG is not tied to the chip it was built on.
 
 **Release builds are ad-hoc signed, not notarized**, so Gatekeeper blocks the first launch. Right-click the app → **Open**, or:
 
