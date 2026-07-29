@@ -10,17 +10,19 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "VidTranslate",
         "width": 1200,
-        "height": 90,
+        "height": 100,
         "decorations": false,
         "alwaysOnTop": true,
         "transparent": true,
+        "shadow": false,
         "resizable": true,
-        "minWidth": 400,
-        "minHeight": 60,
+        "minWidth": 420,
+        "minHeight": 72,
         "center": true
       }
     ],

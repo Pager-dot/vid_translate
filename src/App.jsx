@@ -12,6 +12,18 @@ const MAX_WORDS = 10;
 // as "the chunk just translated", not a growing multi-chunk run-on sentence.
 const MAX_PENDING_WORDS = 8;
 const SETTINGS_H = 640;
+// Fixed compact window height while a setup card (model download / audio setup) is
+// showing — tall mode windows would otherwise leave a large invisible click-blocking
+// strip around the small centered card.
+const SETUP_SCREEN_H = 190;
+const SETUP_STATUSES = [
+  "model_missing",
+  "vosk_ja_model_missing",
+  "vosk_es_model_missing",
+  "ct2_ja_model_missing",
+  "ct2_es_model_missing",
+  "audio_setup_missing",
+];
 
 const DEFAULT_SETTINGS = {
   ollamaKey: "",
@@ -20,7 +32,7 @@ const DEFAULT_SETTINGS = {
   fontScale: 1.0,
   opacity: 0.78,
   width: null, // null = full display width
-  enHeight: 90,
+  enHeight: 100,
   jaHeight: 280,
   useLocalTranslation: false,
   // macOS only: capture the default microphone instead of a virtual loopback device. Set
@@ -379,6 +391,8 @@ export default function App() {
   useEffect(() => { modeRef.current = mode; }, [mode]);
   const liveOnlyRef = useRef(liveOnly);
   useEffect(() => { liveOnlyRef.current = liveOnly; }, [liveOnly]);
+  const statusRef = useRef(status);
+  useEffect(() => { statusRef.current = status; }, [status]);
   const settingsOpenRef = useRef(settingsOpen);
   useEffect(() => { settingsOpenRef.current = settingsOpen; }, [settingsOpen]);
   const useLocalRef = useRef(settings.useLocalTranslation);
@@ -415,10 +429,12 @@ export default function App() {
         } catch { /* ignore corrupt saved position */ }
       }
       const isJa = mode === "vosk-ja" || mode === "vosk-es";
-      const h = isJa && !liveOnly ? settings.jaHeight : settings.enHeight;
+      const h = SETUP_STATUSES.includes(status)
+        ? SETUP_SCREEN_H
+        : isJa && !liveOnly ? settings.jaHeight : settings.enHeight;
       await doResize(settings.width ?? screenWidth(), h);
     })();
-  }, [mode, liveOnly, settings.width, settings.enHeight, settings.jaHeight]);
+  }, [mode, liveOnly, status, settings.width, settings.enHeight, settings.jaHeight]);
 
   // Remember where the user puts the widget (anchored to its bottom edge so
   // mode-height changes don't shift it) and restore it on next launch.
@@ -449,6 +465,7 @@ export default function App() {
       clearTimeout(timer);
       timer = setTimeout(async () => {
         if (settingsOpenRef.current) return; // don't treat the settings window as a preset
+        if (SETUP_STATUSES.includes(statusRef.current)) return; // setup cards use a fixed height, not a preset
         const scale = await win.scaleFactor();
         const size = payload.toLogical(scale);
         const exp = expectedSizeRef.current;
@@ -531,14 +548,7 @@ export default function App() {
 
       const unlistenStatus = await listen("status", (event) => {
         setStatus(event.payload.state);
-        if ([
-          "model_missing",
-          "vosk_ja_model_missing",
-          "vosk_es_model_missing",
-          "ct2_ja_model_missing",
-          "ct2_es_model_missing",
-          "audio_setup_missing",
-        ].includes(event.payload.state)) {
+        if (SETUP_STATUSES.includes(event.payload.state)) {
           setRunning(false);
         }
       });
@@ -687,21 +697,33 @@ export default function App() {
       setStatus("idle");
     };
     return (
-      <div className="bar bar--setup" data-tauri-drag-region>
-        <span className="setup-text">
-          No loopback audio device found. macOS can't share system audio on its own — install
-          BlackHole (free), then set your Mac's output to a Multi-Output Device combining
-          BlackHole with your speakers.
-        </span>
-        <button className="btn" onClick={() => openUrl("https://existential.audio/blackhole/")}>
-          Get BlackHole
-        </button>
-        <button className="btn" onClick={() => setStatus("idle")}>
-          Retry
-        </button>
-        <button className="btn" onClick={useMicrophoneInstead} title="Caption your microphone instead of system audio">
-          Use microphone
-        </button>
+      <div className="setup-screen" data-tauri-drag-region>
+        <div className="setup-card" data-tauri-drag-region>
+          <div className="setup-title" data-tauri-drag-region>System audio not available</div>
+          <p className="setup-msg" data-tauri-drag-region>
+            No loopback audio device found. macOS can't share system audio on its own — install
+            BlackHole (free), then set your Mac's output to a Multi-Output Device combining
+            BlackHole with your speakers.
+          </p>
+          <div className="setup-actions">
+            <button
+              className="btn btn--pill btn--pill-primary"
+              onClick={() => openUrl("https://existential.audio/blackhole/")}
+            >
+              Get BlackHole
+            </button>
+            <button className="btn btn--pill" onClick={() => setStatus("idle")}>
+              Retry
+            </button>
+            <button
+              className="btn btn--pill"
+              onClick={useMicrophoneInstead}
+              title="Caption your microphone instead of system audio"
+            >
+              Use microphone
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -726,28 +748,53 @@ export default function App() {
         : invoke("download_vosk_model", { kind });
 
     return (
-      <div className="bar bar--setup" data-tauri-drag-region>
-        {!dl && (
-          <>
-            <span className="setup-text">{label} model not downloaded yet.</span>
-            <button className="btn" onClick={startDownload}>
-              Download
-            </button>
-          </>
-        )}
-        {dl && dl.status !== "error" && (
-          <span className="setup-text">
-            {dl.status === "downloading" ? `Downloading… ${pct !== null ? pct + "%" : ""}` : "Extracting…"}
-          </span>
-        )}
-        {dl && dl.status === "error" && (
-          <>
-            <span className="setup-text">Download failed: {dl.error}</span>
-            <button className="btn" onClick={startDownload}>
-              Retry
-            </button>
-          </>
-        )}
+      <div className="setup-screen" data-tauri-drag-region>
+        <div className="setup-card" data-tauri-drag-region>
+          {!dl && (
+            <>
+              <div className="setup-title" data-tauri-drag-region>{label} model required</div>
+              <p className="setup-msg" data-tauri-drag-region>
+                Downloads once, then everything runs offline.
+              </p>
+              <div className="setup-actions">
+                <button className="btn btn--pill btn--pill-primary" onClick={startDownload}>
+                  Download
+                </button>
+              </div>
+            </>
+          )}
+          {dl && dl.status !== "error" && (
+            <>
+              <div className="setup-title" data-tauri-drag-region>
+                {dl.status === "downloading" ? `Downloading ${label} model…` : "Extracting…"}
+              </div>
+              <div className="setup-progress-track">
+                <div
+                  className={
+                    dl.status === "downloading" && pct !== null
+                      ? "setup-progress-fill"
+                      : "setup-progress-fill setup-progress-fill--indet"
+                  }
+                  style={{ width: dl.status === "downloading" && pct !== null ? `${pct}%` : "100%" }}
+                />
+              </div>
+              {dl.status === "downloading" && pct !== null && (
+                <span className="setup-progress-pct" data-tauri-drag-region>{pct}%</span>
+              )}
+            </>
+          )}
+          {dl && dl.status === "error" && (
+            <>
+              <div className="setup-title" data-tauri-drag-region>Download failed</div>
+              <p className="setup-msg" data-tauri-drag-region>{dl.error}</p>
+              <div className="setup-actions">
+                <button className="btn btn--pill btn--pill-primary" onClick={startDownload}>
+                  Retry
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     );
   }
@@ -799,7 +846,7 @@ export default function App() {
                   : "Using Ollama for translation"
               }
             >
-              TEST LOCAL
+              LOCAL
             </button>
             <span className={`dot dot--${status}`} />
           </div>

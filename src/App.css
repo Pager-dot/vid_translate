@@ -22,28 +22,28 @@ body,
   user-select: none;
 }
 
+/* Breathing room so the bar's rounded corners and shadow are visible even when the
+   window spans the full display width. Keep small: the transparent ring still belongs
+   to the window rect and blocks clicks to whatever is behind it. */
+#root {
+  padding: 8px;
+}
+
 .bar {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  height: 90px;
+  height: 100%;
   padding: 0 16px;
   background: rgba(0, 0, 0, var(--bg-opacity, 0.78));
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   backdrop-filter: blur(8px);
-  border-radius: 10px;
+  border-radius: 14px;
+  /* blur must stay <= the #root inset or the shadow hard-clips at the window edge */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
   cursor: move;
   position: relative;
-}
-
-.bar--setup {
-  flex-wrap: wrap;
-  gap: 6px;
-  height: auto;
-  min-height: 90px;
-  padding-top: 8px;
-  padding-bottom: 8px;
 }
 
 .btn {
@@ -88,12 +88,30 @@ body,
 
 .btn--mode {
   width: auto;
-  padding: 0 8px;
-  border-radius: 10px;
+  padding: 0 10px;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   opacity: 0.7;
+}
+
+/* Text buttons are pills; the circular .btn default is for icon buttons only. */
+.btn--pill {
+  width: auto;
+  height: 30px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.btn--pill-primary {
+  background: var(--accent-strong);
+  border-color: transparent;
+}
+.btn--pill-primary:hover {
+  background: var(--accent);
 }
 
 .btn--mode:disabled {
@@ -339,11 +357,81 @@ body,
   border-top: 1px solid rgba(255,255,255,0.06);
 }
 
-.setup-text {
+/* ── Setup screens (model download / audio setup) ─────── */
+.setup-screen {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: move;
+}
+
+.setup-card {
+  width: fit-content;
+  max-width: min(600px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  padding: 16px 20px;
+  background: rgba(0, 0, 0, var(--bg-opacity, 0.78));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(8px);
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.setup-title {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.setup-msg {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.8);
-  flex: 1;
+  color: rgba(255, 255, 255, 0.65);
+  line-height: 1.5;
+  max-width: 46ch;
+  /* download errors can contain long unbroken URLs */
+  overflow-wrap: anywhere;
+}
+
+.setup-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.setup-progress-track {
+  width: 240px;
+  max-width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.setup-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.25s;
+}
+
+/* no byte total yet / extracting — full-width pulsing fill */
+.setup-progress-fill--indet {
+  animation: pulse 1.5s infinite;
+}
+
+.setup-progress-pct {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
 }
 
 /* ── Settings + Close action buttons ──────────────────── */
@@ -352,7 +440,7 @@ body,
   width: 40px;
   height: 40px;
   font-size: 18px;
-  border-radius: 10px;
+  border-radius: 12px;
 }
 
 .btn--settings {
@@ -377,7 +465,8 @@ body,
   width: 100%;
   height: 100%;
   background: rgba(12, 12, 14, 0.97);
-  border-radius: 10px;
+  border-radius: 14px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
   display: flex;
   flex-direction: column;
   overflow: hidden;
