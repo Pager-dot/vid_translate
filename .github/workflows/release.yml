@@ -18,13 +18,14 @@ jobs:
           # and won't run on older distros.
           - platform: ubuntu-22.04
           - platform: windows-latest
-          # Two separate macOS runners rather than one universal build: ct2rs CMake-builds
-          # CTranslate2 for the host arch only, so a `universal-apple-darwin` target would
-          # fail to link. macos-14 is Apple Silicon, macos-13 is Intel.
+          # Apple Silicon only — one arm64 DMG covers every M-series Mac (M1…M4, incl.
+          # Pro/Max/Ultra). Intel is deliberately not built.
+          #
+          # This stays a per-arch job rather than a universal build because ct2rs
+          # CMake-builds CTranslate2 for the host arch only, so a `universal-apple-darwin`
+          # target would fail to link. macos-14 is the Apple Silicon image.
           - platform: macos-14
             arch: aarch64
-          - platform: macos-13
-            arch: x86_64
     runs-on: ${{ matrix.platform }}
 
     steps:
@@ -188,7 +189,7 @@ jobs:
 
             - **Linux** — `.AppImage` (`chmod +x` it, then run) or `.deb`
             - **Windows** — `.msi` or `-setup.exe`
-            - **macOS** — `.dmg` (`aarch64` for Apple Silicon, `x86_64` for Intel)
+            - **macOS** — `.dmg` (Apple Silicon only: M1, M2, M3, M4, incl. Pro/Max/Ultra)
 
             Speech models are downloaded from within the app on first use.
 
