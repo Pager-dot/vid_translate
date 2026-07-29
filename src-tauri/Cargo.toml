@@ -32,3 +32,9 @@ ct2rs = "0.9"
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.23"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# CoreAudio input capture. macOS has no public system-audio loopback API, so the mac backend
+# captures from a virtual loopback *device* (BlackHole & co.) like any other input — see
+# src/audio/macos.rs.
+cpal = "0.15"
+

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 import "./App.css";
 
@@ -22,6 +23,9 @@ const DEFAULT_SETTINGS = {
   enHeight: 90,
   jaHeight: 280,
   useLocalTranslation: false,
+  // macOS only: capture the default microphone instead of a virtual loopback device. Set
+  // from the audio setup screen when the user would rather not install a loopback driver.
+  preferMicrophone: false,
 };
 
 function loadSettings() {
@@ -533,6 +537,7 @@ export default function App() {
           "vosk_es_model_missing",
           "ct2_ja_model_missing",
           "ct2_es_model_missing",
+          "audio_setup_missing",
         ].includes(event.payload.state)) {
           setRunning(false);
         }
@@ -594,6 +599,7 @@ export default function App() {
         ollamaKey: settings.ollamaKey || null,
         ollamaModel: settings.ollamaModel || null,
         useLocalTranslation: settings.useLocalTranslation,
+        preferMicrophone: settings.preferMicrophone,
       });
     }
   };
@@ -664,6 +670,39 @@ export default function App() {
         onClose={closeSettings}
         onReset={resetSettings}
       />
+    );
+  }
+
+  // ── macOS audio setup: no loopback driver installed ─────────────────────────
+  // Linux and Windows can tap the system output mix directly, so this screen only ever
+  // appears on macOS, which offers no such API — capturing what the Mac is playing requires
+  // a virtual loopback driver the user installs once.
+  if (status === "audio_setup_missing") {
+    const useMicrophoneInstead = () => {
+      setSettings((s) => {
+        const next = { ...s, preferMicrophone: true };
+        localStorage.setItem("vt_settings", JSON.stringify(next));
+        return next;
+      });
+      setStatus("idle");
+    };
+    return (
+      <div className="bar bar--setup" data-tauri-drag-region>
+        <span className="setup-text">
+          No loopback audio device found. macOS can't share system audio on its own — install
+          BlackHole (free), then set your Mac's output to a Multi-Output Device combining
+          BlackHole with your speakers.
+        </span>
+        <button className="btn" onClick={() => openUrl("https://existential.audio/blackhole/")}>
+          Get BlackHole
+        </button>
+        <button className="btn" onClick={() => setStatus("idle")}>
+          Retry
+        </button>
+        <button className="btn" onClick={useMicrophoneInstead} title="Caption your microphone instead of system audio">
+          Use microphone
+        </button>
+      </div>
     );
   }
 

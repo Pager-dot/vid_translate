@@ -28,7 +28,7 @@ vid_translate/
 │   ├── src/
 │   │   ├── main.rs             # Tauri entry point (unchanged)
 │   │   ├── lib.rs              # Commands, events, pipeline state
-│   │   ├── audio/              # System audio capture (linux.rs / windows.rs)
+│   │   ├── audio/              # System audio capture (linux.rs / windows.rs / macos.rs)
 │   │   └── recognizer.rs       # Vosk streaming recognizer
 │   ├── Cargo.toml              # Rust dependencies
 │   ├── tauri.conf.json         # Window config

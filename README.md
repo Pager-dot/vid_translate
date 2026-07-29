@@ -21,7 +21,7 @@ The widget is draggable, remembers its position and size, spans the full display
 - 🔴 **LIVE** toggle — show only the current spoken sentence, hide the translation history
 - 🖱️ Drag anywhere, resize freely — size & position persist across launches
 - 🎨 Settings panel: font, font scale, opacity, widget width & heights, with a Reset button
-- 🖥️ Cross-platform: Linux (PulseAudio/PipeWire) and Windows (WASAPI loopback)
+- 🖥️ Cross-platform: Linux (PulseAudio/PipeWire), Windows (WASAPI loopback), macOS (CoreAudio via a loopback driver)
 
 ---
 
@@ -44,12 +44,15 @@ vid_translate/
 ├── dist/                           # Vite build output (generated — embedded in release builds)
 └── src-tauri/                      # ── Rust backend ──
     ├── Cargo.toml                  # Rust deps: tauri 2, vosk, ureq, zip, dirs, serde, tokio,
-    │                               #   wasapi (Windows-only)
+    │                               #   wasapi (Windows-only), cpal (macOS-only)
     ├── Cargo.lock                  # Pinned dependency versions
-    ├── build.rs                    # Linux: links vendor/libvosk.so, embeds $ORIGIN rpaths
-    ├── tauri.conf.json             # Window config (frameless, transparent, always-on-top),
-    │                               #   bundle resources (Windows DLLs), dev URL
+    ├── build.rs                    # Per-platform link paths + rpaths for the Vosk library
+    ├── tauri.conf.json             # Window config (frameless, transparent, always-on-top), dev URL
     ├── tauri.linux.conf.json       # Linux-only overlay: bundles libvosk.so into the package
+    ├── tauri.windows.conf.json     # Windows-only overlay: bundles the DLLs as resources
+    ├── tauri.macos.conf.json       # macOS-only overlay: libvosk.dylib → Contents/Frameworks
+    ├── Info.plist                  # macOS: merged into the bundle (mic usage description)
+    ├── entitlements.plist          # macOS: used only when signing with a real identity
     ├── capabilities/
     │   └── default.json            # Tauri v2 permissions (drag, resize, reposition, close…)
     ├── src/
@@ -62,10 +65,12 @@ vid_translate/
     │   └── audio/
     │       ├── mod.rs              # SAMPLE_RATE = 16000, cfg-switch between platforms
     │       ├── linux.rs            # Linux system-audio capture (parec / PulseAudio)
-    │       └── windows.rs          # Windows system-audio capture (WASAPI loopback)
+    │       ├── windows.rs          # Windows system-audio capture (WASAPI loopback)
+    │       └── macos.rs            # macOS capture (CoreAudio loopback device + resampler)
     ├── vendor/
-    │   └── linux-x86_64/
-    │       └── libvosk.so          # Vosk shared library for Linux builds
+    │   ├── linux-x86_64/
+    │   │   └── libvosk.so          # Vosk shared library for Linux builds
+    │   └── macos/                  # libvosk.dylib — fetched, not committed (see scripts/)
     ├── libvosk.dll                 # ┐
     ├── libvosk.lib                 # │ Vosk + MinGW runtime libraries
     ├── libgcc_s_seh-1.dll          # │ vendored for Windows builds
@@ -133,6 +138,7 @@ The first time you start a mode whose model is missing, the widget shows a **Dow
 ```
 ~/.local/share/vid_translate/          (Linux)
 %LOCALAPPDATA%\vid_translate\          (Windows)
+~/Library/Application Support/vid_translate/   (macOS)
     ├── vosk-model        # English
     ├── vosk-model-ja     # Japanese
     └── vosk-model-es     # Spanish
@@ -152,7 +158,9 @@ No manual steps needed.
 |---|---|
 | **Node.js** ≥ 18 + npm | Frontend tooling |
 | **Rust** (stable) + Cargo | Install via [rustup](https://rustup.rs) |
-| **Tauri v2 system deps** | Linux: `webkit2gtk-4.1`, `libappindicator`, etc. — see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) |
+| **Tauri v2 system deps** | Linux: `webkit2gtk-4.1`, `libappindicator`, etc. — see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). macOS: Xcode Command Line Tools + CMake (`brew install cmake`) |
+| **libvosk (macOS only)** | `bash scripts/fetch-libvosk-macos.sh` once before the first build |
+| **A loopback driver (macOS only)** | [BlackHole](https://existential.audio/blackhole/) or similar — see the macOS section below |
 | **Ollama** *(optional)* | Only needed for JA/ES translation — [ollama.com/download](https://ollama.com/download) |
 
 ### Steps
@@ -215,7 +223,36 @@ This produces an `.msi` / NSIS installer under:
 src-tauri\target\release\bundle\
 ```
 
-The required DLLs (`libvosk.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`) are vendored in `src-tauri/` and bundled automatically as resources. Audio capture uses **WASAPI loopback**, so it hears whatever the system is playing.
+The required DLLs (`libvosk.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`) are vendored in `src-tauri/` and bundled automatically as resources (see `tauri.windows.conf.json`). Audio capture uses **WASAPI loopback**, so it hears whatever the system is playing.
+
+### 🍎 macOS
+
+```bash
+cd vid_translate
+bash scripts/fetch-libvosk-macos.sh     # once — downloads libvosk.dylib into src-tauri/vendor/macos/
+npx tauri build --bundles app
+```
+
+`libvosk.dylib` is copied into `VidTranslate.app/Contents/Frameworks` (via `tauri.macos.conf.json`) and found at runtime through the `@executable_path/../Frameworks` rpath embedded by `build.rs` — no Homebrew or system-wide Vosk install needed.
+
+Builds are per-architecture, not universal: `ct2rs` CMake-builds CTranslate2 for the host arch only, so CI runs one job on Apple Silicon and one on Intel.
+
+**Release builds are ad-hoc signed, not notarized**, so Gatekeeper blocks the first launch. Right-click the app → **Open**, or:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/vid_translate.app
+```
+
+#### ⚠️ System audio on macOS needs a loopback driver
+
+Linux and Windows can tap the system output mix directly. macOS offers no such API to ordinary apps, so VidTranslate captures from a **virtual loopback device** instead — a free driver that presents whatever is played into it as a recordable input:
+
+1. Install [BlackHole 2ch](https://existential.audio/blackhole/) (or Loopback, VB-Cable, Soundflower…).
+2. Open **Audio MIDI Setup** → **+** → **Create Multi-Output Device**, and tick both *BlackHole 2ch* and your speakers/headphones.
+3. Set that Multi-Output Device as your Mac's sound output. You keep hearing audio, and BlackHole gets a copy.
+4. Start VidTranslate — it auto-detects BlackHole and captures from it.
+
+If no loopback device is installed, the app shows a setup screen with a link to BlackHole and a **Use microphone** button, which falls back to capturing the default input instead. macOS will ask for microphone permission on the first capture either way — a loopback device is an input device as far as the OS is concerned.
 
 ---
 
@@ -249,4 +286,4 @@ Whisper is a batch encoder-decoder — it always processes a 30-second window, a
 - [React 19](https://react.dev/) + [Vite 7](https://vitejs.dev/) — frontend
 - [Vosk](https://alphacephei.com/vosk/) — streaming speech recognition (EN/JA/ES models)
 - [Ollama](https://ollama.com/) — LLM translation (local or cloud)
-- PulseAudio/PipeWire (`parec`) on Linux, WASAPI loopback on Windows — system audio capture
+- PulseAudio/PipeWire (`parec`) on Linux, WASAPI loopback on Windows, CoreAudio (`cpal`) + a loopback driver on macOS — system audio capture

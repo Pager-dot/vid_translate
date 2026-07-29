@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the generated Contents/Info.plist by tauri-bundler on macOS builds.
+
+  A virtual loopback driver (BlackHole & co.) is an ordinary CoreAudio *input* device, so
+  capturing from it goes through the same TCC microphone gate a real mic would — without
+  NSMicrophoneUsageDescription macOS kills the app the moment the stream starts instead of
+  showing a permission prompt.
+-->
+<plist version="1.0">
+  <dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>VidTranslate reads the audio your Mac is playing (through a loopback device such as BlackHole) so it can transcribe and translate it on screen. Audio is processed on your machine and never recorded.</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSUIElement</key>
+    <false/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+  </dict>
+</plist>

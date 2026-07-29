@@ -18,6 +18,13 @@ jobs:
           # and won't run on older distros.
           - platform: ubuntu-22.04
           - platform: windows-latest
+          # Two separate macOS runners rather than one universal build: ct2rs CMake-builds
+          # CTranslate2 for the host arch only, so a `universal-apple-darwin` target would
+          # fail to link. macos-14 is Apple Silicon, macos-13 is Intel.
+          - platform: macos-14
+            arch: aarch64
+          - platform: macos-13
+            arch: x86_64
     runs-on: ${{ matrix.platform }}
 
     steps:
@@ -49,6 +56,45 @@ jobs:
           workspaces: src-tauri
 
       - run: npm ci
+
+      # Fetched at build time rather than committed (Linux/Windows vendor theirs in-tree),
+      # from Vosk's universal2 macOS wheel — one 12MB x86_64+arm64 binary serving both
+      # runners. The script hard-fails if the slice for the arch being built is missing.
+      - name: Fetch libvosk for macOS
+        if: startsWith(matrix.platform, 'macos')
+        run: bash scripts/fetch-libvosk-macos.sh
+
+      - name: Build (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          # Must match bundle.macOS.minimumSystemVersion. 11.0 rather than 10.15 because
+          # arm64 macOS does not exist below Big Sur — a lower target is rejected outright
+          # when building for Apple Silicon, and Intel Macs run 11.0 fine.
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: npm run tauri build -- --bundles app
+
+      # Tauri only codesigns when a real identity is configured, so an unsigned .app comes out
+      # of the build above. Apple Silicon refuses to launch any binary without at least an
+      # ad-hoc signature, and the bundle's contents changed after the linker signed the
+      # executable — so sign the finished bundle here, then build the DMG around it.
+      - name: Sign and package (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          set -euo pipefail
+          bundle_dir=src-tauri/target/release/bundle/macos
+          app=$(find "$bundle_dir" -maxdepth 1 -name '*.app' | head -1)
+          [ -n "$app" ] || { echo "::error::no .app bundle was produced"; exit 1; }
+          echo "Signing $app"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          version=$(node -p "require('./package.json').version")
+          dmg="$bundle_dir/VidTranslate_${version}_${{ matrix.arch }}.dmg"
+          staging=$(mktemp -d)
+          cp -R "$app" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname VidTranslate -srcfolder "$staging" -ov -format ULFO "$dmg"
+          ls -lh "$dmg"
 
       - name: Build (Linux)
         if: matrix.platform == 'ubuntu-22.04'
@@ -111,6 +157,7 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/macos/*.dmg
 
   # Single release job: both platforms' bundles land on ONE draft release. (Two
   # concurrent jobs each creating a draft would produce duplicate drafts, since a
@@ -141,5 +188,13 @@ jobs:
 
             - **Linux** — `.AppImage` (`chmod +x` it, then run) or `.deb`
             - **Windows** — `.msi` or `-setup.exe`
+            - **macOS** — `.dmg` (`aarch64` for Apple Silicon, `x86_64` for Intel)
 
             Speech models are downloaded from within the app on first use.
+
+            **macOS notes** — the build is ad-hoc signed, not notarized, so Gatekeeper blocks
+            it on first launch: right-click the app → **Open**, or run
+            `xattr -dr com.apple.quarantine /Applications/vid_translate.app`.
+            macOS also has no system-audio API, so capturing what your Mac plays needs a free
+            loopback driver — the app links to [BlackHole](https://existential.audio/blackhole/)
+            and walks you through it on first run.

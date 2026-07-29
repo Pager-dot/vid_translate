@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Only applied when the app is actually signed with an identity (APPLE_SIGNING_IDENTITY) —
+  CI ad-hoc signs without the hardened runtime, where none of these are required. Kept here
+  so a real Developer ID + notarization run works without further changes.
+
+  disable-library-validation is the one that isn't obvious: under the hardened runtime, a
+  Developer ID-signed binary refuses to load libvosk.dylib because the prebuilt Vosk library
+  carries a different (ad-hoc) signature.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+  </dict>
+</plist>

@@ -482,7 +482,12 @@ fn start_listening(
     ollama_key: Option<String>,
     ollama_model: Option<String>,
     use_local_translation: Option<bool>,
+    prefer_microphone: Option<bool>,
 ) {
+    // macOS only (a no-op elsewhere): set before the loopback check below, since opting into
+    // microphone capture is precisely what makes a missing loopback driver acceptable.
+    audio::set_prefer_microphone(prefer_microphone.unwrap_or(false));
+
     let mut pipeline = state.lock().unwrap();
 
     pipeline.stop_flag.store(true, Ordering::Relaxed);
@@ -497,10 +502,19 @@ fn start_listening(
     let mode = mode.unwrap_or_else(|| "vosk".into());
     let use_local = use_local_translation.unwrap_or(false);
 
-    let handle = std::thread::spawn(move || match mode.as_str() {
-        "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
-        "vosk-es" => run_vosk_es_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
-        _ => run_vosk_pipeline(app_handle, stop_flag),
+    let handle = std::thread::spawn(move || {
+        // On macOS there is no system-audio API, only virtual loopback drivers the user has
+        // to install themselves. Check first so a machine without one gets a setup screen
+        // rather than a session that "runs" but transcribes pure silence forever.
+        if audio::loopback_device_name().is_none() {
+            let _ = app_handle.emit("status", StatusEvent { state: "audio_setup_missing".into() });
+            return;
+        }
+        match mode.as_str() {
+            "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
+            "vosk-es" => run_vosk_es_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
+            _ => run_vosk_pipeline(app_handle, stop_flag),
+        }
     });
 
     pipeline.thread = Some(handle);

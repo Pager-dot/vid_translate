@@ -1,0 +1,3 @@
+# Fetched by scripts/fetch-libvosk-macos.sh (run automatically in CI) rather than committed:
+# the universal dylib is ~30MB and Vosk publishes it as a release asset already.
+libvosk.dylib
