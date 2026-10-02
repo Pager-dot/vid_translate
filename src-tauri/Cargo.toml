@@ -42,4 +42,7 @@ wasapi = "0.23"
 cpal = "0.15"
 # Verifies the BlackHole package before it is handed to a root installer.
 sha2 = "0.10"
+# One AppKit call Tauri exposes no API for: the window's collection behavior, so the
+# always-on-top widget still shows up in Mission Control. Already in the tree via tao.
+objc2 = "0.6"
 

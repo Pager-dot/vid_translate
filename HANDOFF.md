@@ -209,8 +209,10 @@ No separate "finals array" to avoid duplication bugs.
 
 ### `src-tauri/tauri.conf.json`
 Window: `decorations: false`, `alwaysOnTop: true`, `transparent: true`,
-`resizable: true`, `minWidth: 400`, `minHeight: 60`, starts at `1200×90`
-positioned near the bottom of a 1080p screen (`y: 950`).
+`shadow: false`, `resizable: true`, `minWidth: 420`, `minHeight: 72`, starts at
+`1200×100`, `center: true`. `macOSPrivateApi: true` sits one level up under `app` —
+without it the transparent window is an opaque slab on macOS. The macOS window's
+Spaces/Mission Control behaviour is *not* configurable here; see below.
 
 ---
 
@@ -224,13 +226,30 @@ macOS cannot, so the app captures from a *virtual loopback driver* the user inst
 (BlackHole, Loopback, VB-Cable…), which presents whatever is played into it as a
 recordable input. `start_listening` calls `audio::loopback_device_name()` first and emits
 `status: "audio_setup_missing"` if none is found, which the frontend turns into a setup
-screen with a BlackHole link and a **Use microphone** fallback button. Without that
+screen with an **Install BlackHole** button (the `install_blackhole` command — see below)
+and a **Use microphone** fallback button. Without that
 pre-flight check a session would "run" and silently transcribe nothing forever.
 (The one *native* route to system audio is ScreenCaptureKit on macOS 13+ — but it lives in
 the screen-recording framework, so it demands the **Screen Recording** permission, which is
 why this app sticks to the driver + microphone-permission-only approach.)
 
-**BlackHole can be installed with zero GUI steps — but not from a non-interactive shell.**
+**The app installs BlackHole itself.** `install_blackhole` (`lib.rs`) downloads the
+official 2ch package, verifies it against the SHA-256 Homebrew's cask pins, and runs
+`installer -pkg -target /` plus `killall coreaudiod` through osascript's `with
+administrator privileges`. It emits `blackhole_install_progress`
+(`downloading` → `installing` → `done` | `error`) and the setup screen auto-retries the
+capture on success. The checksum is checked *before* the file is handed to a root
+installer. Dismissing the password dialog is AppleScript error `-128`, surfaced as
+"installation cancelled". 2ch rather than 16ch/64ch because capture is stereo — the wider
+builds only add channels the pipeline discards. The package URL is versioned, so upstream
+releases cannot silently change what gets installed; bumping it is a deliberate edit of
+both the URL and the hash.
+
+Installing the driver is necessary but **not sufficient** — without a Multi-Output Device
+(next note) BlackHole is installed and nothing routes into it, so the app starts and hears
+silence.
+
+**BlackHole can also be installed with zero GUI steps — but not from a non-interactive shell.**
 `brew install blackhole-2ch` runs a `.pkg` through `sudo`, which dies with "a terminal is
 required to read the password" in any shell without a TTY (CI, agents, scripts). The
 workaround is to fetch the pkg and hand it to macOS's GUI authorization dialog, which
@@ -267,6 +286,34 @@ while any aggregate is the default output, the **keyboard volume keys stop worki
 aggregates expose no master volume control. Revert = set the default output back and
 `AudioHardwareDestroyAggregateDevice` (or delete it in Audio MIDI Setup).
 
+**Window level, Spaces and Mission Control.** `alwaysOnTop: true` makes tao call
+`setLevel(NSFloatingWindowLevel)` (tao `platform_impl/macos/window.rs`). AppKit's
+documented default collection behaviour for *any* window above `NSNormalWindowLevel` is
+`NSWindowCollectionBehaviorTransient` — "floats across Spaces, hides in Exposé" — and that
+one default produces three separate-looking bug reports:
+
+- the widget does not appear in Mission Control;
+- it cannot be sent to another desktop;
+- after Cmd-Tabbing away there is no obvious way back to the desktop it was left on.
+
+`make_window_mission_control_visible` in `lib.rs` sets the behaviour explicitly to
+`Managed | FullScreenAuxiliary` on startup. `Managed` is Apple's "participates in Spaces
+and Exposé"; the three behaviours in that group (`Managed`, `Transient`, `Stationary`) are
+mutually exclusive and only a *default* when none is set, so asking for `Managed` keeps the
+floating window level while restoring ordinary window management.
+`FullScreenAuxiliary` lets the widget accompany a full-screen video instead of being left
+behind on the desktop Space.
+
+This needs one AppKit message send: Tauri exposes `set_visible_on_all_workspaces`
+(`CanJoinAllSpaces`) but nothing for the rest of `collectionBehavior`, and
+`CanJoinAllSpaces` solves a *different* problem — it pins the widget to every desktop at
+once, which is not the same as letting it be managed like a normal window. The call is
+cosmetic, so a failure is logged and startup continues.
+
+The app is *not* `LSUIElement` (see `Info.plist`), so it keeps a Dock icon and does appear
+in Cmd-Tab — which is worth knowing before anyone "fixes" Cmd-Tab by making it an accessory
+app, as that would remove it from the switcher entirely.
+
 **`libvosk.dylib` is fetched, not committed.** `scripts/fetch-libvosk-macos.sh` pulls
 Vosk's `universal2` wheel from PyPI (`vosk/libvosk.dyld` inside — note the odd `.dyld`
 extension) rather than the GitHub release, because the wheel filename and contents are
@@ -287,9 +334,11 @@ M-series job specifically while the Intel job passes — set in `tauri.macos.con
 
 **Builds are per-architecture, not universal.** `ct2rs` CMake-builds CTranslate2 for the
 host arch only (it sets `CMAKE_OSX_ARCHITECTURES=arm64` itself), so a
-`universal-apple-darwin` target would fail to link. CI runs `macos-14` (Apple Silicon) and
-`macos-13` (Intel) and ships two DMGs. Both are baseline builds — no `-mcpu=native`
-anywhere — so the arm64 DMG covers every M-series chip, not just the one CI built on.
+`universal-apple-darwin` target would fail to link — which is why this is a per-arch matrix
+job rather than one universal build. Since `da4f615` CI runs **only** `macos-14` (Apple
+Silicon) and ships one aarch64 DMG; Intel is deliberately not built. The build is baseline
+— no `-mcpu=native` anywhere — so that DMG covers every M-series chip, not just the one CI
+built on.
 
 **Signing.** Tauri only codesigns when a real identity is configured, so CI ad-hoc signs
 the finished `.app` itself (`codesign --force --deep --sign -`) and then builds the DMG

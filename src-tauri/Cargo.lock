@@ -5165,6 +5165,7 @@ dependencies = [
  "cpal",
  "ct2rs",
  "dirs 5.0.1",
+ "objc2",
  "serde",
  "serde_json",
  "sha2",

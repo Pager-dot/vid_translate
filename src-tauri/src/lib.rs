@@ -1047,10 +1047,53 @@ fn pull_model(app: tauri::AppHandle, model: String) {
     });
 }
 
+/// Opts the widget into Mission Control and Spaces despite being an always-on-top window.
+///
+/// `alwaysOnTop` makes tao set `NSFloatingWindowLevel`, and AppKit's documented default for
+/// any window above `NSNormalWindowLevel` is `NSWindowCollectionBehaviorTransient` — which
+/// means "floats across Spaces, hides in Exposé". That default is why the widget was absent
+/// from Mission Control, could not be sent to another desktop, and was awkward to find
+/// again after Cmd-Tab.
+///
+/// The three behaviours in that group are mutually exclusive and only a *default* when none
+/// is set, so asking for `Managed` explicitly ("participates in Spaces and Exposé") keeps
+/// the floating level while restoring normal window management. `FullScreenAuxiliary` lets
+/// it accompany a full-screen video rather than being left behind on the desktop Space,
+/// which is the case it exists for.
+#[cfg(target_os = "macos")]
+fn make_window_mission_control_visible(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let ns_window = window.ns_window().map_err(|e| e.to_string())? as *mut AnyObject;
+    if ns_window.is_null() {
+        return Err("ns_window was null".into());
+    }
+    // Managed = 1 << 2, FullScreenAuxiliary = 1 << 8 (NSWindowCollectionBehavior).
+    const MANAGED: usize = 1 << 2;
+    const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+    unsafe {
+        let _: () = msg_send![ns_window, setCollectionBehavior: MANAGED | FULL_SCREEN_AUXILIARY];
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // Cosmetic-only: a failure here leaves the widget working, just missing from
+            // Mission Control, so it is logged rather than aborting startup.
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = make_window_mission_control_visible(&window) {
+                    eprintln!("[window] could not set collection behavior: {e}");
+                }
+            }
+            let _ = app;
+            Ok(())
+        })
         .manage(Mutex::new(PipelineState::default()))
         .manage(marian::MarianState::default())
         .invoke_handler(tauri::generate_handler![
