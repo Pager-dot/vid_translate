@@ -43,7 +43,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
-            file
+            file \
+            squashfs-tools
 
       - uses: actions/setup-node@v4
         with:
@@ -171,17 +172,24 @@ jobs:
           chmod +x "$appimage"
           echo "Repacked: $(ls -lh "$appimage" | awk '{print $5}')"
 
-          # Verify against the finished image rather than the AppDir, so a future
-          # appimagetool that rewrites modes again fails the build instead of shipping.
-          check=$(mktemp -d)
-          cp "$appimage" "$check/out.AppImage"
-          (cd "$check" && ./out.AppImage --appimage-extract >/dev/null)
-          # -005 = other r+x; dirs need both to be traversable by another uid.
-          bad=$(find "$check/squashfs-root" \( -type d -o -name 'AppRun' -o -name 'AppRun.wrapped' \) \
-                  ! -perm -005 -print)
+          # Verify the finished image, so a future appimagetool that rewrites modes fails
+          # the build instead of shipping. Read the modes with unsquashfs rather than
+          # --appimage-extract: the runtime's extractor mkdir()s at 0700 whatever the
+          # squashfs stores, so extraction cannot tell a real 0700 from its own umask.
+          off=$("$appimage" --appimage-offset)
+          echo "Top of the AppDir as actually stored:"
+          unsquashfs -ll -max-depth 1 -o "$off" "$appimage" | sed -n '1,12p'
+          bad=$(unsquashfs -ll -o "$off" "$appimage" | awk '
+            $1 ~ /^d/ || ($1 ~ /^-/ && $NF ~ /\/AppRun(\.wrapped)?$/) {
+              if (substr($1,8,1) != "r" || substr($1,10,1) != "x") print $1, $NF
+            }')
           if [ -n "$bad" ]; then
             echo "::error::not world-traversable/executable after repack:"; echo "$bad"; exit 1
           fi
+
+          check=$(mktemp -d)
+          cp "$appimage" "$check/out.AppImage"
+          (cd "$check" && ./out.AppImage --appimage-extract >/dev/null)
           [ -f "$check/squashfs-root/.DirIcon" ] || { echo "::error::.DirIcon does not resolve"; exit 1; }
           echo "AppImage checks passed: .DirIcon resolves, modes are world-readable."
 
