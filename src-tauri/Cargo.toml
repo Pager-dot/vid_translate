@@ -40,4 +40,6 @@ wasapi = "0.23"
 # captures from a virtual loopback *device* (BlackHole & co.) like any other input — see
 # src/audio/macos.rs.
 cpal = "0.15"
+# Verifies the BlackHole package before it is handed to a root installer.
+sha2 = "0.10"
 

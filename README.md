@@ -256,12 +256,16 @@ xattr -dr com.apple.quarantine /Applications/VidTranslate.app
 
 Linux and Windows can tap the system output mix directly. macOS offers no such API to ordinary apps, so VidTranslate captures from a **virtual loopback device** instead — a free driver that presents whatever is played into it as a recordable input:
 
-1. Install [BlackHole 2ch](https://existential.audio/blackhole/) (or Loopback, VB-Cable, Soundflower…).
+1. Install BlackHole 2ch. The setup screen's **Install BlackHole** button now does this for you:
+   it downloads the official package, verifies its checksum, and installs it after macOS asks
+   for your password (a HAL plug-in goes into `/Library/Audio/Plug-Ins`, which needs root).
+   `2ch` is the right variant — capture is stereo, so the 16ch/64ch builds only add channels
+   to ignore. You can still install it yourself, or use Loopback, VB-Cable, Soundflower…
 2. Open **Audio MIDI Setup** → **+** → **Create Multi-Output Device**, and tick both *BlackHole 2ch* and your speakers/headphones.
 3. Set that Multi-Output Device as your Mac's sound output. You keep hearing audio, and BlackHole gets a copy.
 4. Start VidTranslate — it auto-detects BlackHole and captures from it.
 
-If no loopback device is installed, the app shows a setup screen with a link to BlackHole and a **Use microphone** button, which falls back to capturing the default input instead. macOS will ask for microphone permission on the first capture either way — a loopback device is an input device as far as the OS is concerned.
+If no loopback device is installed, the app shows a setup screen with an **Install BlackHole** button and a **Use microphone** button, which falls back to capturing the default input instead. macOS will ask for microphone permission on the first capture either way — a loopback device is an input device as far as the OS is concerned.
 
 **Terminal-only setup (optional)** — no GUI needed for either step:
 

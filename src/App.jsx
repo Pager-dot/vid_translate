@@ -315,6 +315,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen]   = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(null); // { kind, status, downloaded, total, error }
   const [ct2DownloadProgress, setCt2DownloadProgress] = useState(null); // same shape, local translation models
+  const [blackHoleInstall, setBlackHoleInstall] = useState(null); // macOS loopback driver install
 
   const [settings, setSettings] = useState(loadSettings);
   const [draft, setDraft]       = useState(settings);
@@ -573,7 +574,26 @@ export default function App() {
         }
       });
 
-      unlistenRefs.current = [unlistenTx, unlistenStatus, unlistenDownload, unlistenCt2Download];
+      // The driver only becomes visible to CoreAudio once coreaudiod has restarted, which
+      // the installer script does, so a successful install can go straight back to the
+      // capture attempt that raised this screen.
+      const unlistenBlackHole = await listen("blackhole_install_progress", (event) => {
+        setBlackHoleInstall(event.payload);
+        if (event.payload.status === "done") {
+          setTimeout(() => {
+            setBlackHoleInstall(null);
+            toggleRef.current();
+          }, 400);
+        }
+      });
+
+      unlistenRefs.current = [
+        unlistenTx,
+        unlistenStatus,
+        unlistenDownload,
+        unlistenCt2Download,
+        unlistenBlackHole,
+      ];
     };
 
     setupListeners();
@@ -696,33 +716,88 @@ export default function App() {
       });
       setStatus("idle");
     };
+    const bh = blackHoleInstall;
+    const bhPct = bh && bh.total ? Math.round((bh.downloaded / bh.total) * 100) : null;
+
     return (
       <div className="setup-screen" data-tauri-drag-region>
         <div className="setup-card" data-tauri-drag-region>
-          <div className="setup-title" data-tauri-drag-region>System audio not available</div>
-          <p className="setup-msg" data-tauri-drag-region>
-            No loopback audio device found. macOS can't share system audio on its own — install
-            BlackHole (free), then set your Mac's output to a Multi-Output Device combining
-            BlackHole with your speakers.
-          </p>
-          <div className="setup-actions">
-            <button
-              className="btn btn--pill btn--pill-primary"
-              onClick={() => openUrl("https://existential.audio/blackhole/")}
-            >
-              Get BlackHole
-            </button>
-            <button className="btn btn--pill" onClick={() => setStatus("idle")}>
-              Retry
-            </button>
-            <button
-              className="btn btn--pill"
-              onClick={useMicrophoneInstead}
-              title="Caption your microphone instead of system audio"
-            >
-              Use microphone
-            </button>
-          </div>
+          {!bh && (
+            <>
+              <div className="setup-title" data-tauri-drag-region>System audio not available</div>
+              <p className="setup-msg" data-tauri-drag-region>
+                No loopback audio device found. macOS can't share system audio on its own —
+                installing BlackHole (free) lets VidTranslate hear what your Mac plays. macOS
+                will ask for your password.
+              </p>
+              <div className="setup-actions">
+                <button
+                  className="btn btn--pill btn--pill-primary"
+                  onClick={() => invoke("install_blackhole")}
+                >
+                  Install BlackHole
+                </button>
+                <button className="btn btn--pill" onClick={() => setStatus("idle")}>
+                  Retry
+                </button>
+                <button
+                  className="btn btn--pill"
+                  onClick={useMicrophoneInstead}
+                  title="Caption your microphone instead of system audio"
+                >
+                  Use microphone
+                </button>
+              </div>
+            </>
+          )}
+          {bh && bh.status !== "error" && (
+            <>
+              <div className="setup-title" data-tauri-drag-region>
+                {bh.status === "downloading"
+                  ? "Downloading BlackHole…"
+                  : "Installing — approve the password prompt…"}
+              </div>
+              <div className="setup-progress-track">
+                <div
+                  className={
+                    bh.status === "downloading" && bhPct !== null
+                      ? "setup-progress-fill"
+                      : "setup-progress-fill setup-progress-fill--indet"
+                  }
+                  style={{
+                    width: bh.status === "downloading" && bhPct !== null ? `${bhPct}%` : "100%",
+                  }}
+                />
+              </div>
+              {bh.status === "downloading" && bhPct !== null && (
+                <span className="setup-progress-pct" data-tauri-drag-region>{bhPct}%</span>
+              )}
+            </>
+          )}
+          {bh && bh.status === "error" && (
+            <>
+              <div className="setup-title" data-tauri-drag-region>Install failed</div>
+              <p className="setup-msg" data-tauri-drag-region>{bh.error}</p>
+              <div className="setup-actions">
+                <button
+                  className="btn btn--pill btn--pill-primary"
+                  onClick={() => invoke("install_blackhole")}
+                >
+                  Try again
+                </button>
+                <button
+                  className="btn btn--pill"
+                  onClick={() => openUrl("https://existential.audio/blackhole/")}
+                  title="Download it yourself instead"
+                >
+                  Download manually
+                </button>
+                <button className="btn btn--pill" onClick={useMicrophoneInstead}>
+                  Use microphone
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     );
