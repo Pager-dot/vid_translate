@@ -136,6 +136,16 @@ jobs:
           cp "$appimage" "$workdir/in.AppImage"
           (cd "$workdir" && ./in.AppImage --appimage-extract >/dev/null)
 
+          # linuxdeploy writes .DirIcon as an *absolute* symlink into the build
+          # directory, so it dangles everywhere but this runner (appimagetool's own
+          # test rejects it: "FATAL: .DirIcon is missing"). Re-point it relatively.
+          # Also repoint the root icon at the 128x128 one: linuxdeploy picks the
+          # smallest (32x32), which is what the catalog would use as the thumbnail.
+          rm -f "$workdir/squashfs-root/.DirIcon" "$workdir/squashfs-root/vid_translate.png"
+          ln -s usr/share/icons/hicolor/128x128/apps/vid_translate.png \
+            "$workdir/squashfs-root/vid_translate.png"
+          ln -s vid_translate.png "$workdir/squashfs-root/.DirIcon"
+
           for lib in libwayland-client.so.0 libwayland-egl.so.1 \
                      libwayland-cursor.so.0 libwayland-server.so.0; do
             rm -fv "$workdir/squashfs-root/usr/lib/$lib"

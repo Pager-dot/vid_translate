@@ -316,3 +316,9 @@ Whisper is a batch encoder-decoder — it always processes a 30-second window, a
 - [Vosk](https://alphacephei.com/vosk/) — streaming speech recognition (EN/JA/ES models)
 - [Ollama](https://ollama.com/) — LLM translation (local or cloud)
 - PulseAudio/PipeWire (`parec`) on Linux, WASAPI loopback on Windows, CoreAudio (`cpal`) + a loopback driver on macOS — system audio capture
+
+---
+
+## 📄 License
+
+[Apache License 2.0](LICENSE).
