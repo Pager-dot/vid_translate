@@ -136,27 +136,54 @@ jobs:
           cp "$appimage" "$workdir/in.AppImage"
           (cd "$workdir" && ./in.AppImage --appimage-extract >/dev/null)
 
+          appdir="$workdir/squashfs-root"
+          # Derived, not hardcoded, so renaming productName cannot silently break this.
+          app=$(basename "$(find "$appdir/usr/share/applications" -name '*.desktop' | head -1)" .desktop)
+          echo "App name inside the AppDir: $app"
+
           # linuxdeploy writes .DirIcon as an *absolute* symlink into the build
           # directory, so it dangles everywhere but this runner (appimagetool's own
           # test rejects it: "FATAL: .DirIcon is missing"). Re-point it relatively.
           # Also repoint the root icon at the 128x128 one: linuxdeploy picks the
           # smallest (32x32), which is what the catalog would use as the thumbnail.
-          rm -f "$workdir/squashfs-root/.DirIcon" "$workdir/squashfs-root/vid_translate.png"
-          ln -s usr/share/icons/hicolor/128x128/apps/vid_translate.png \
-            "$workdir/squashfs-root/vid_translate.png"
-          ln -s vid_translate.png "$workdir/squashfs-root/.DirIcon"
+          rm -f "$appdir/.DirIcon" "$appdir/$app.png"
+          ln -s "usr/share/icons/hicolor/128x128/apps/$app.png" "$appdir/$app.png"
+          ln -s "$app.png" "$appdir/.DirIcon"
+
+          # appimagetool is pulled from `continuous`, an unpinned moving target: the build
+          # that packed v0.0.3 produced 0755 directories, a later one produced 0700, which
+          # made the image unusable for any user but the one that built it (the catalog
+          # runs it under firejail as another uid -> "AppRun: Permission denied"). Set the
+          # modes explicitly so the result no longer depends on appimagetool's defaults.
+          # linuxdeploy also leaves AppRun.wrapped at 0770, with no world-execute bit.
+          chmod -R a+rX "$appdir"
+          chmod 0755 "$appdir/AppRun" "$appdir/AppRun.wrapped"
 
           for lib in libwayland-client.so.0 libwayland-egl.so.1 \
                      libwayland-cursor.so.0 libwayland-server.so.0; do
-            rm -fv "$workdir/squashfs-root/usr/lib/$lib"
+            rm -fv "$appdir/usr/lib/$lib"
           done
 
           curl -sSfL -o "$workdir/appimagetool" \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x "$workdir/appimagetool"
-          "$workdir/appimagetool" "$workdir/squashfs-root" "$appimage"
+          "$workdir/appimagetool" "$appdir" "$appimage"
           chmod +x "$appimage"
           echo "Repacked: $(ls -lh "$appimage" | awk '{print $5}')"
+
+          # Verify against the finished image rather than the AppDir, so a future
+          # appimagetool that rewrites modes again fails the build instead of shipping.
+          check=$(mktemp -d)
+          cp "$appimage" "$check/out.AppImage"
+          (cd "$check" && ./out.AppImage --appimage-extract >/dev/null)
+          # -005 = other r+x; dirs need both to be traversable by another uid.
+          bad=$(find "$check/squashfs-root" \( -type d -o -name 'AppRun' -o -name 'AppRun.wrapped' \) \
+                  ! -perm -005 -print)
+          if [ -n "$bad" ]; then
+            echo "::error::not world-traversable/executable after repack:"; echo "$bad"; exit 1
+          fi
+          [ -f "$check/squashfs-root/.DirIcon" ] || { echo "::error::.DirIcon does not resolve"; exit 1; }
+          echo "AppImage checks passed: .DirIcon resolves, modes are world-readable."
 
       - uses: actions/upload-artifact@v4
         with:
@@ -205,7 +232,7 @@ jobs:
 
             **macOS notes** — the build is ad-hoc signed, not notarized, so Gatekeeper blocks
             it on first launch: right-click the app → **Open**, or run
-            `xattr -dr com.apple.quarantine /Applications/vid_translate.app`.
+            `xattr -dr com.apple.quarantine /Applications/VidTranslate.app`.
             macOS also has no system-audio API, so capturing what your Mac plays needs a free
             loopback driver — the app links to [BlackHole](https://existential.audio/blackhole/)
             and walks you through it on first run.

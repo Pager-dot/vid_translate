@@ -27,6 +27,10 @@ fn main() {
         // Look for libvosk.so next to the executable at runtime (AppImage/deb layout),
         // so no system-wide install or LD_LIBRARY_PATH is required.
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        // Tauri names the bundled lib dir after productName, so this must track it.
+        // The pre-0.0.5 name stays on the rpath as a harmless fallback: a missing
+        // rpath entry is skipped by the loader, and it keeps older debs working.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/VidTranslate");
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/vid_translate");
     }
     tauri_build::build()

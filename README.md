@@ -196,14 +196,14 @@ npx tauri build --bundles appimage
 Output lands in:
 
 ```
-src-tauri/target/release/bundle/appimage/vid_translate_0.0.1_amd64.AppImage
+src-tauri/target/release/bundle/appimage/VidTranslate_0.0.4_amd64.AppImage
 ```
 
 First run — make it executable:
 
 ```bash
-chmod +x src-tauri/target/release/bundle/appimage/vid_translate_0.0.1_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/vid_translate_0.0.1_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/VidTranslate_0.0.4_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/VidTranslate_0.0.4_amd64.AppImage
 ```
 
 > `libvosk.so` is bundled inside the AppImage (via `tauri.linux.conf.json` + rpath magic in `build.rs`) — no system-wide Vosk install needed.
@@ -249,7 +249,7 @@ There is no universal binary because `ct2rs` CMake-builds CTranslate2 for the ho
 **Release builds are ad-hoc signed, not notarized**, so Gatekeeper blocks the first launch. Right-click the app → **Open**, or:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/vid_translate.app
+xattr -dr com.apple.quarantine /Applications/VidTranslate.app
 ```
 
 #### ⚠️ System audio on macOS needs a loopback driver
