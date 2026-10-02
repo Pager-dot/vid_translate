@@ -3,7 +3,7 @@
   "bundle": {
     "macOS": {
       "frameworks": ["vendor/macos/libvosk.dylib"],
-      "minimumSystemVersion": "11.0",
+      "minimumSystemVersion": "14.4",
       "entitlements": "entitlements.plist"
     }
   }

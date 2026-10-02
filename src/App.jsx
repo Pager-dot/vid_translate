@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 import "./App.css";
 
@@ -22,7 +21,8 @@ const SETUP_STATUSES = [
   "vosk_es_model_missing",
   "ct2_ja_model_missing",
   "ct2_es_model_missing",
-  "audio_setup_missing",
+  "audio_permission_denied",
+  "audio_tap_unavailable",
 ];
 
 const DEFAULT_SETTINGS = {
@@ -315,7 +315,6 @@ export default function App() {
   const [settingsOpen, setSettingsOpen]   = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(null); // { kind, status, downloaded, total, error }
   const [ct2DownloadProgress, setCt2DownloadProgress] = useState(null); // same shape, local translation models
-  const [blackHoleInstall, setBlackHoleInstall] = useState(null); // macOS loopback driver install
 
   const [settings, setSettings] = useState(loadSettings);
   const [draft, setDraft]       = useState(settings);
@@ -574,26 +573,7 @@ export default function App() {
         }
       });
 
-      // The driver only becomes visible to CoreAudio once coreaudiod has restarted, which
-      // the installer script does, so a successful install can go straight back to the
-      // capture attempt that raised this screen.
-      const unlistenBlackHole = await listen("blackhole_install_progress", (event) => {
-        setBlackHoleInstall(event.payload);
-        if (event.payload.status === "done") {
-          setTimeout(() => {
-            setBlackHoleInstall(null);
-            toggleRef.current();
-          }, 400);
-        }
-      });
-
-      unlistenRefs.current = [
-        unlistenTx,
-        unlistenStatus,
-        unlistenDownload,
-        unlistenCt2Download,
-        unlistenBlackHole,
-      ];
+      unlistenRefs.current = [unlistenTx, unlistenStatus, unlistenDownload, unlistenCt2Download];
     };
 
     setupListeners();
@@ -703,11 +683,15 @@ export default function App() {
     );
   }
 
-  // ── macOS audio setup: no loopback driver installed ─────────────────────────
-  // Linux and Windows can tap the system output mix directly, so this screen only ever
-  // appears on macOS, which offers no such API — capturing what the Mac is playing requires
-  // a virtual loopback driver the user installs once.
-  if (status === "audio_setup_missing") {
+  // ── macOS audio capture faults ───────────────────────────────────────────────
+  // Linux and Windows tap the system output mix directly, so these screens only ever
+  // appear on macOS. Capture there goes through a Core Audio process tap, which needs no
+  // driver and no routing setup — only permission, which macOS ties to the app's code
+  // signature. Release builds are ad-hoc signed, so the grant is lost on every update
+  // while the stale entry still reads as enabled: the permission screen is routine, not
+  // an edge case, and its copy says "we're not hearing anything" rather than accusing the
+  // user of denying something.
+  if (status === "audio_permission_denied" || status === "audio_tap_unavailable") {
     const useMicrophoneInstead = () => {
       setSettings((s) => {
         const next = { ...s, preferMicrophone: true };
@@ -716,88 +700,46 @@ export default function App() {
       });
       setStatus("idle");
     };
-    const bh = blackHoleInstall;
-    const bhPct = bh && bh.total ? Math.round((bh.downloaded / bh.total) * 100) : null;
+    const retry = () => {
+      setStatus("idle");
+      setTimeout(() => toggleRef.current(), 100);
+    };
+    const denied = status === "audio_permission_denied";
 
     return (
       <div className="setup-screen" data-tauri-drag-region>
         <div className="setup-card" data-tauri-drag-region>
-          {!bh && (
-            <>
-              <div className="setup-title" data-tauri-drag-region>System audio not available</div>
-              <p className="setup-msg" data-tauri-drag-region>
-                No loopback audio device found. macOS can't share system audio on its own —
-                installing BlackHole (free) lets VidTranslate hear what your Mac plays. macOS
-                will ask for your password.
-              </p>
-              <div className="setup-actions">
-                <button
-                  className="btn btn--pill btn--pill-primary"
-                  onClick={() => invoke("install_blackhole")}
-                >
-                  Install BlackHole
-                </button>
-                <button className="btn btn--pill" onClick={() => setStatus("idle")}>
-                  Retry
-                </button>
-                <button
-                  className="btn btn--pill"
-                  onClick={useMicrophoneInstead}
-                  title="Caption your microphone instead of system audio"
-                >
-                  Use microphone
-                </button>
-              </div>
-            </>
-          )}
-          {bh && bh.status !== "error" && (
-            <>
-              <div className="setup-title" data-tauri-drag-region>
-                {bh.status === "downloading"
-                  ? "Downloading BlackHole…"
-                  : "Installing — approve the password prompt…"}
-              </div>
-              <div className="setup-progress-track">
-                <div
-                  className={
-                    bh.status === "downloading" && bhPct !== null
-                      ? "setup-progress-fill"
-                      : "setup-progress-fill setup-progress-fill--indet"
-                  }
-                  style={{
-                    width: bh.status === "downloading" && bhPct !== null ? `${bhPct}%` : "100%",
-                  }}
-                />
-              </div>
-              {bh.status === "downloading" && bhPct !== null && (
-                <span className="setup-progress-pct" data-tauri-drag-region>{bhPct}%</span>
-              )}
-            </>
-          )}
-          {bh && bh.status === "error" && (
-            <>
-              <div className="setup-title" data-tauri-drag-region>Install failed</div>
-              <p className="setup-msg" data-tauri-drag-region>{bh.error}</p>
-              <div className="setup-actions">
-                <button
-                  className="btn btn--pill btn--pill-primary"
-                  onClick={() => invoke("install_blackhole")}
-                >
-                  Try again
-                </button>
-                <button
-                  className="btn btn--pill"
-                  onClick={() => openUrl("https://existential.audio/blackhole/")}
-                  title="Download it yourself instead"
-                >
-                  Download manually
-                </button>
-                <button className="btn btn--pill" onClick={useMicrophoneInstead}>
-                  Use microphone
-                </button>
-              </div>
-            </>
-          )}
+          <div className="setup-title" data-tauri-drag-region>
+            {denied ? "Not hearing any audio" : "System audio unavailable"}
+          </div>
+          <p className="setup-msg" data-tauri-drag-region>
+            {denied
+              ? "macOS needs permission to let VidTranslate hear what your Mac is playing. Allow it under Privacy & Security → Audio Recording, then try again."
+              : "Capturing system audio needs macOS 14.4 or later. You can caption your microphone instead."}
+          </p>
+          <div className="setup-actions">
+            {denied && (
+              <button
+                className="btn btn--pill btn--pill-primary"
+                onClick={() => invoke("open_audio_privacy_settings")}
+              >
+                Open Privacy Settings
+              </button>
+            )}
+            <button
+              className={denied ? "btn btn--pill" : "btn btn--pill btn--pill-primary"}
+              onClick={retry}
+            >
+              Try again
+            </button>
+            <button
+              className="btn btn--pill"
+              onClick={useMicrophoneInstead}
+              title="Caption your microphone instead of system audio"
+            >
+              Use microphone
+            </button>
+          </div>
         </div>
       </div>
     );

@@ -36,13 +36,17 @@ ct2rs = "0.9"
 wasapi = "0.23"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# CoreAudio input capture. macOS has no public system-audio loopback API, so the mac backend
-# captures from a virtual loopback *device* (BlackHole & co.) like any other input — see
-# src/audio/macos.rs.
+# Microphone capture only. System audio goes through a Core Audio process tap instead (see
+# src/audio/tap.rs), which cpal cannot reach: the tap's aggregate device is private, and
+# cpal's API starts from device enumeration.
 cpal = "0.15"
-# Verifies the BlackHole package before it is handed to a root installer.
-sha2 = "0.10"
-# One AppKit call Tauri exposes no API for: the window's collection behavior, so the
-# always-on-top widget still shows up in Mission Control. Already in the tree via tao.
+# Core Audio process taps: system-audio capture with no driver. coreaudio-sys is already in
+# the tree via cpal, but naming it pins the binding contract this code depends on rather
+# than inheriting whatever cpal happens to resolve.
+coreaudio-sys = "0.2"
+core-foundation = "0.10"
+# CATapDescription is an Objective-C class, and the window's collection behavior is one
+# AppKit call Tauri exposes no API for. Both already in the tree via tao.
 objc2 = "0.6"
+objc2-foundation = "0.3"
 

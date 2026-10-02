@@ -21,7 +21,7 @@ The widget is draggable, remembers its position and size, spans the full display
 - 🔴 **LIVE** toggle — show only the current spoken sentence, hide the translation history
 - 🖱️ Drag anywhere, resize freely — size & position persist across launches
 - 🎨 Settings panel: font, font scale, opacity, widget width & heights, with a Reset button
-- 🖥️ Cross-platform: Linux (PulseAudio/PipeWire), Windows (WASAPI loopback), macOS (CoreAudio via a loopback driver)
+- 🖥️ Cross-platform: Linux (PulseAudio/PipeWire), Windows (WASAPI loopback), macOS (Core Audio process tap — driverless)
 
 ---
 
@@ -66,7 +66,8 @@ vid_translate/
     │       ├── mod.rs              # SAMPLE_RATE = 16000, cfg-switch between platforms
     │       ├── linux.rs            # Linux system-audio capture (parec / PulseAudio)
     │       ├── windows.rs          # Windows system-audio capture (WASAPI loopback)
-    │       └── macos.rs            # macOS capture (CoreAudio loopback device + resampler)
+    │       ├── macos.rs            # macOS capture supervisor + resampler (shared by both paths)
+    │       └── tap.rs              # macOS Core Audio process tap (driverless system audio)
     ├── vendor/
     │   ├── linux-x86_64/
     │   │   └── libvosk.so          # Vosk shared library for Linux builds
@@ -92,7 +93,7 @@ The **mode button** in the widget bar cycles through the three modes (click it w
 
 <br>
 
-1. System audio is captured at 16 kHz mono (PulseAudio on Linux, WASAPI loopback on Windows).
+1. System audio is captured at 16 kHz mono (PulseAudio on Linux, WASAPI loopback on Windows, a Core Audio process tap on macOS).
 2. 250 ms chunks are streamed into the **Vosk English model** (`vosk-model-small-en-us-0.15`).
 3. Vosk emits **partial** results (the sentence being spoken right now, updating live) and **final** results (completed utterances).
 4. Captions appear instantly in the overlay — no translation step, no network, fully offline.
@@ -160,7 +161,6 @@ No manual steps needed.
 | **Rust** (stable) + Cargo | Install via [rustup](https://rustup.rs) |
 | **Tauri v2 system deps** | Linux: `webkit2gtk-4.1`, `libappindicator`, etc. — see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). macOS: Xcode Command Line Tools + CMake (`brew install cmake`) |
 | **libvosk (macOS only)** | `bash scripts/fetch-libvosk-macos.sh` once before the first build |
-| **A loopback driver (macOS only)** | [BlackHole](https://existential.audio/blackhole/) or similar — see the macOS section below |
 | **Ollama** *(optional)* | Only needed for JA/ES translation — [ollama.com/download](https://ollama.com/download) |
 
 ### Steps
@@ -235,16 +235,15 @@ npx tauri build --bundles app
 
 `libvosk.dylib` is copied into `VidTranslate.app/Contents/Frameworks` (via `tauri.macos.conf.json`) and found at runtime through the `@executable_path/../Frameworks` rpath embedded by `build.rs` — no Homebrew or system-wide Vosk install needed. The fetch script pulls Vosk's `universal2` build (x86_64 + arm64) and hard-fails if the arm64 slice is missing.
 
-**Requires macOS 11 (Big Sur) or later** — Apple Silicon does not exist below 11.0, so that is the floor for both architectures.
+**Requires macOS 14.4 (Sonoma) or later** — that is where Core Audio process taps became dependable, and capturing system audio is the whole point of the app.
 
-Releases ship **two** DMGs, split by architecture, not by chip generation:
+Releases ship **one** DMG:
 
 | Download | Runs on |
 |---|---|
 | `VidTranslate_<version>_aarch64.dmg` | **All** Apple Silicon Macs — M1, M2, M3, M4, including Pro/Max/Ultra |
-| `VidTranslate_<version>_x86_64.dmg` | Intel Macs |
 
-There is no universal binary because `ct2rs` CMake-builds CTranslate2 for the host arch only, so CI runs one job on Apple Silicon and one on Intel. Both are baseline builds (no `-mcpu=native`), so the Apple Silicon DMG is not tied to the chip it was built on.
+There is no universal binary and no Intel build: `ct2rs` CMake-builds CTranslate2 for the host arch only, so a universal target would fail to link and CI runs a single Apple Silicon job. It is a baseline build (no `-mcpu=native`), so that DMG is not tied to the chip it was built on.
 
 **Release builds are ad-hoc signed, not notarized**, so Gatekeeper blocks the first launch. Right-click the app → **Open**, or:
 
@@ -252,42 +251,34 @@ There is no universal binary because `ct2rs` CMake-builds CTranslate2 for the ho
 xattr -dr com.apple.quarantine /Applications/VidTranslate.app
 ```
 
-#### ⚠️ System audio on macOS needs a loopback driver
+#### 🔊 System audio needs one permission, nothing else
 
-Linux and Windows can tap the system output mix directly. macOS offers no such API to ordinary apps, so VidTranslate captures from a **virtual loopback device** instead — a free driver that presents whatever is played into it as a recordable input:
+Linux and Windows can tap the system output mix directly. macOS could not, until 14.4 — so
+VidTranslate now uses a **Core Audio process tap**: no driver to install, no audio routing to
+reconfigure, nothing to undo afterwards.
 
-1. Install BlackHole 2ch. The setup screen's **Install BlackHole** button now does this for you:
-   it downloads the official package, verifies its checksum, and installs it after macOS asks
-   for your password (a HAL plug-in goes into `/Library/Audio/Plug-Ins`, which needs root).
-   `2ch` is the right variant — capture is stereo, so the 16ch/64ch builds only add channels
-   to ignore. You can still install it yourself, or use Loopback, VB-Cable, Soundflower…
-2. Open **Audio MIDI Setup** → **+** → **Create Multi-Output Device**, and tick both *BlackHole 2ch* and your speakers/headphones.
-3. Set that Multi-Output Device as your Mac's sound output. You keep hearing audio, and BlackHole gets a copy.
-4. Start VidTranslate — it auto-detects BlackHole and captures from it.
+The first time you start a session, macOS asks for permission to record audio. Allow it and
+you are done. If captions stay blank, open **System Settings → Privacy & Security → Audio
+Recording** and check that VidTranslate is enabled — the in-app screen has a button that takes
+you straight there.
 
-If no loopback device is installed, the app shows a setup screen with an **Install BlackHole** button and a **Use microphone** button, which falls back to capturing the default input instead. macOS will ask for microphone permission on the first capture either way — a loopback device is an input device as far as the OS is concerned.
+What this means in practice:
 
-**Terminal-only setup (optional)** — no GUI needed for either step:
+- **Any output device works**, including Bluetooth headphones and AirPods. Switch mid-session
+  and capture follows you.
+- **It keeps working while your output is muted** or at zero volume, because the tap reads the
+  mix before the output device applies volume. Useful if you cannot hear the audio at all.
+- **Your keyboard volume keys keep working.** The old Multi-Output Device approach broke them;
+  the tap's capture device is private and is never your system output.
 
-```bash
-brew install blackhole-2ch   # asks for your admin password (it's a .pkg installer)
-sudo killall coreaudiod      # installer says "reboot required" — restarting coreaudiod suffices
-```
+**A caveat worth knowing:** macOS ties this permission to the app's code signature, and release
+builds are ad-hoc signed rather than Developer ID signed. So after updating VidTranslate you
+may have to grant permission again, and macOS will confusingly still list the old entry as
+enabled. If captions stop working right after an update, that is why — toggle the switch off
+and on, or use the in-app button to reach the pane.
 
-The Multi-Output Device can also be created programmatically instead of via Audio MIDI Setup — it is just a "stacked" CoreAudio aggregate device (`AudioHardwareCreateAggregateDevice`); see the macOS notes in `HANDOFF.md` for the exact recipe.
-
-**Good to know:**
-
-- While a Multi-Output Device is the system output, the **keyboard volume keys are disabled** — macOS cannot control an aggregate device's volume. Adjust volume in the app that's playing, or switch output back when you're done captioning.
-- **Undoing it all:** switch output back to your speakers (System Settings → Sound), delete the Multi-Output Device in Audio MIDI Setup (select it → **–**), then remove the driver:
-
-  ```bash
-  sudo rm -rf /Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver && sudo killall coreaudiod
-  ```
-
-  That single folder is the entire install — BlackHole ships no kernel extensions, launch agents, or background processes.
-
----
+Prefer to caption a live conversation instead? Any of these screens has a **Use microphone**
+button, which captures the default input device instead of system audio.
 
 ## ⚙️ Settings
 
@@ -319,7 +310,7 @@ Whisper is a batch encoder-decoder — it always processes a 30-second window, a
 - [React 19](https://react.dev/) + [Vite 7](https://vitejs.dev/) — frontend
 - [Vosk](https://alphacephei.com/vosk/) — streaming speech recognition (EN/JA/ES models)
 - [Ollama](https://ollama.com/) — LLM translation (local or cloud)
-- PulseAudio/PipeWire (`parec`) on Linux, WASAPI loopback on Windows, CoreAudio (`cpal`) + a loopback driver on macOS — system audio capture
+- PulseAudio/PipeWire (`parec`) on Linux, WASAPI loopback on Windows, Core Audio process taps on macOS — system audio capture
 
 ---
 

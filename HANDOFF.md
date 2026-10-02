@@ -8,7 +8,7 @@ Built on **Tauri v2 + React 19 (Vite)** with a **Rust** backend.
 ## What It Does
 
 - Sits as a frameless, always-on-top, transparent bar over the desktop
-- Captures whatever is playing through the speakers (system loopback audio) on
+- Captures whatever is playing through the speakers (the system audio mix) on
   Linux, Windows and macOS
 - Transcribes speech in real-time using Vosk (offline, no internet needed)
 - Shows spoken words in gray as they're being said, highlights the current word in white
@@ -77,7 +77,7 @@ brew install cmake              # CTranslate2 is CMake-built by ct2rs
 bash scripts/fetch-libvosk-macos.sh   # once — puts libvosk.dylib in src-tauri/vendor/macos/
 ```
 
-Plus a **virtual loopback driver** at runtime — see "macOS specifics" below.
+Plus one **audio-recording permission** at runtime, which macOS prompts for — see "macOS specifics" below.
 
 ---
 
@@ -118,7 +118,7 @@ Subsequent builds are fast.
 Platform capture backend                [src-tauri/src/audio/]
   Linux    parec --device <sink>.monitor --format s16le --rate 16000 --channels 1
   Windows  WASAPI loopback on the default render device (autoconvert to 16k mono)
-  macOS    CoreAudio input on a virtual loopback device, downmixed + resampled to 16k
+  macOS    Core Audio process tap on the system mix, downmixed + resampled to 16k
         │
         │  250ms chunks of i16 samples — identical contract on all three
         ▼
@@ -158,14 +158,24 @@ for PipeWire's PulseAudio compatibility layer on Fedora.
 expresses loopback. `autoconvert: true` makes the shared-mode audio engine resample and
 downmix to 16 kHz mono for us.
 
-**`macos.rs`** — the odd one out, because macOS gives ordinary apps no system-audio API
-at all. It enumerates CoreAudio input devices via `cpal` and picks a virtual loopback
-driver by ranked name match (`LOOPBACK_HINTS`, most-specific first, so a real BlackHole
-beats a generic "Aggregate Device"). That device reports its own native format, so this
-backend also owns the downmix + resample to 16 kHz that the other two get for free.
+**`macos.rs`** — the odd one out, and the only backend with two paths. System audio comes
+from a Core Audio process tap (`tap.rs`), drained by `tap_capture_loop`; the microphone
+fallback still goes through `cpal` + `build_stream`, because enumeration is exactly right for
+a real input device. The tap reports its own native format (48kHz stereo on built-in output,
+44.1kHz over Bluetooth), so this backend owns the downmix + resample to 16 kHz that the other
+two get for free. `Resampler` is shared by both paths and is the regression net for the chunk
+contract — its two tests are the reason the tap rewrite could be trusted.
 
-`mod.rs` also exports `loopback_device_name()` and `set_prefer_microphone()` — no-ops
-on Linux/Windows, real on macOS.
+`mod.rs` also exports `preflight()`, `capture_fault()` and `set_prefer_microphone()` — no-ops
+on Linux/Windows, real on macOS — plus the shared `CaptureFault` enum, whose `status()` maps a
+fault to the frontend status string. `preflight()` only checks what is knowable before
+starting (the OS version); permission cannot be checked up front, because the tap API reports
+success either way.
+
+**`tap.rs`** — all the `unsafe`. The `extern "C"` declarations bindgen skips, the
+`CATapDescription` construction, the aggregate `CFDictionary`, the IOProc, the
+default-output listener, the lock-free `Ring`, and `Drop`-based teardown. Read the module
+comment before touching it; see also "macOS specifics" below.
 
 ### `src-tauri/src/recognizer.rs`
 Wraps the Vosk `Model` + `Recognizer`. Processes each audio chunk
@@ -190,7 +200,7 @@ Emits two Tauri events to the frontend:
 | Event | Payload |
 |-------|---------|
 | `transcription` | `{ text: string, type: "partial" \| "final" }` |
-| `status` | `{ state: "loading" \| "listening" \| "idle" \| "error" \| "model_missing" \| "vosk_{ja,es}_model_missing" \| "ct2_{ja,es}_model_missing" \| "audio_setup_missing" }` |
+| `status` | `{ state: "loading" \| "listening" \| "idle" \| "error" \| "model_missing" \| "vosk_{ja,es}_model_missing" \| "ct2_{ja,es}_model_missing" \| "audio_permission_denied" \| "audio_tap_unavailable" }` |
 
 ### `src/App.jsx`
 Single caption state — one array of words + a boolean `isPartial`.  
@@ -221,98 +231,68 @@ Spaces/Mission Control behaviour is *not* configurable here; see below.
 Everything here is non-obvious and cost real debugging time — read before touching the
 mac build.
 
-**There is no system-audio API.** Linux and Windows can tap the output mix directly.
-macOS cannot, so the app captures from a *virtual loopback driver* the user installs
-(BlackHole, Loopback, VB-Cable…), which presents whatever is played into it as a
-recordable input. `start_listening` calls `audio::loopback_device_name()` first and emits
-`status: "audio_setup_missing"` if none is found, which the frontend turns into a setup
-screen with an **Install BlackHole** button (the `install_blackhole` command — see below)
-and a **Use microphone** fallback button. Without that
-pre-flight check a session would "run" and silently transcribe nothing forever.
-(The one *native* route to system audio is ScreenCaptureKit on macOS 13+ — but it lives in
-the screen-recording framework, so it demands the **Screen Recording** permission, which is
-why this app sticks to the driver + microphone-permission-only approach.)
+**System audio comes from a Core Audio process tap.** Linux and Windows tap the output mix
+directly; macOS gave ordinary apps no way to until 14.4. The app used to require a *virtual
+loopback driver* (BlackHole) plus a hand-built Multi-Output Device — six manual steps that
+also broke the keyboard volume keys, captured nothing after a switch to Bluetooth, and fed
+silence to anyone who muted their output. All of that is gone. `audio/tap.rs` creates a
+`CATapDescription` global tap, wraps it in a **private** aggregate device, and reads it with
+an IOProc. `audio/macos.rs` drains that into the same 250ms/16kHz/mono/i16 chunks the other
+backends produce.
 
-**The app installs BlackHole itself.** `install_blackhole` (`lib.rs`) downloads the
-official 2ch package, verifies it against the SHA-256 Homebrew's cask pins, and runs
-`installer -pkg -target /` plus `killall coreaudiod` through osascript's `with
-administrator privileges`. It emits `blackhole_install_progress`
-(`downloading` → `installing` → `done` | `error`) and the setup screen auto-retries the
-capture on success. The checksum is checked *before* the file is handed to a root
-installer. Dismissing the password dialog is AppleScript error `-128`, surfaced as
-"installation cancelled". 2ch rather than 16ch/64ch because capture is stereo — the wider
-builds only add channels the pipeline discards. The package URL is versioned, so upstream
-releases cannot silently change what gets installed; bumping it is a deliberate edit of
-both the URL and the hash.
+Three things about taps are not discoverable from Apple's headers, and each one cost real
+debugging time:
 
-Installing the driver is necessary but **not sufficient** — without a Multi-Output Device
-(next note) BlackHole is installed and nothing routes into it, so the app starts and hears
-silence.
+1. **A tap is not readable on its own.** It must be wrapped in an aggregate device whose
+   *main sub-device* is a real output device — that device clocks the aggregate. The
+   aggregate here is created with `kAudioAggregateDeviceIsPrivateKey`, so it never appears in
+   Audio MIDI Setup and is never the system output. That is what keeps the user's device
+   choice and their volume keys working, and it is also why `cpal` cannot be used on this
+   path: a private aggregate is invisible to device enumeration, and cpal's API starts from
+   enumeration. We drive it by `AudioObjectID` instead.
 
-**BlackHole can also be installed with zero GUI steps — but not from a non-interactive shell.**
-`brew install blackhole-2ch` runs a `.pkg` through `sudo`, which dies with "a terminal is
-required to read the password" in any shell without a TTY (CI, agents, scripts). The
-workaround is to fetch the pkg and hand it to macOS's GUI authorization dialog, which
-prompts the logged-in user directly:
+2. **`AudioHardwareCreateProcessTap` returns `noErr` even when TCC denied permission.** There
+   is no error to check, ever. A denied tap either delivers buffers of bit-exact zeros
+   forever, or stops delivering buffers at all — both observed. So `Ring` tracks the frame
+   count *and* the OR of every sample's raw bits, and `silence_verdict()` turns
+   "buffers arriving, all zero, for 6s" into `CaptureFault::PermissionDenied` and "no buffers
+   at all for 3s" into `CaptureFault::NoAudioFrames`. Heuristics, unavoidably.
 
-```bash
-brew fetch --cask blackhole-2ch
-pkg=$(find "$(brew --cache)/downloads" -name '*BlackHole2ch*.pkg' | head -1)
-osascript -e "do shell script \"/usr/sbin/installer -pkg '$pkg' -target / && killall coreaudiod\" with administrator privileges"
-```
+3. **The capture thread must service a run loop.** TCC cannot present its authorization
+   dialog to a process that never pumps one, and *silently denies* instead. A
+   `thread::sleep` drain loop reproduced the denial every single time; swapping it for
+   `CFRunLoopRunInMode` reproduced a working capture every time. This is why
+   `tap_capture_loop` pumps the run loop instead of sleeping when the ring is empty — it is
+   load-bearing, not stylistic. Pumping also delivers the default-output property-listener
+   callbacks.
 
-Two gotchas: the installer claims a reboot is required — `killall coreaudiod` suffices
-(coreaudiod respawns and loads the driver immediately). And when the cask's sudo step
-fails, Homebrew *purges its registration*, so a later direct `installer` run leaves
-`brew uninstall` thinking nothing is installed — revert with
-`sudo rm -rf /Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver && sudo killall coreaudiod`
-(that folder is the entire install; there are no kexts or launch agents).
+**The IOProc is a realtime thread.** It may only copy into the preallocated lock-free ring
+and bump atomics. No allocation, no `Mutex`, no `mpsc::Sender::send` (std's channel allocates
+per send), no `eprintln!`, no ObjC messages, no CoreAudio property calls, no panics. All
+resampling, `i16` conversion, chunking and channel sending happen on the supervisor thread.
+`Resampler` allocates, so it must never be called from the IOProc.
 
-**The Multi-Output Device is scriptable too.** What Audio MIDI Setup calls a Multi-Output
-Device is just a CoreAudio aggregate with `"stacked": 1`. Create it with
-`AudioHardwareCreateAggregateDevice` using the raw dictionary keys (the SDK constant names
-have churned across releases; the string literals have not):
+**Output-device changes rebuild the aggregate, not the tap.** The property listener on
+`kAudioHardwarePropertyDefaultOutputDevice` only sets a flag — calling back into CoreAudio
+from inside a listener is a documented deadlock source. The supervisor debounces 300ms
+(connecting AirPods fires the property several times as the device appears, is selected and
+settles), then stops the IOProc, destroys and recreates the aggregate against the new output,
+and clears the ring so pre-switch frames are not spliced in. The tap survives, which avoids a
+second TCC evaluation, and the pipeline above never stops — Vosk just sees a short gap. If
+the new tap format differs (44.1kHz Bluetooth vs 48kHz built-in) the `Resampler` is rebuilt
+and the partial chunk dropped.
 
-```
-{ "name": "...", "uid": "<unique>", "stacked": 1,
-  "master": <speakers UID>,                       // real output = clock master
-  "subdevices": [ { "uid": <speakers UID> },
-                  { "uid": <BlackHole UID>, "drift": 1 } ] }   // drift-correct BlackHole
-```
+**Teardown order matters.** `AudioDeviceStop` → `DestroyIOProcID` →
+`DestroyAggregateDevice` → `DestroyProcessTap` → remove listener, and it must also run on
+`SystemTap::new`'s error paths — hence building the struct incrementally and letting `Drop`
+clean up. A leaked aggregate leaves a phantom device behind until reboot.
 
-then point `kAudioHardwarePropertyDefaultOutputDevice` at the returned device ID. The user
-keeps hearing audio while BlackHole carries the copy. Known macOS limitation, not a bug:
-while any aggregate is the default output, the **keyboard volume keys stop working** —
-aggregates expose no master volume control. Revert = set the default output back and
-`AudioHardwareDestroyAggregateDevice` (or delete it in Audio MIDI Setup).
-
-**Window level, Spaces and Mission Control.** `alwaysOnTop: true` makes tao call
-`setLevel(NSFloatingWindowLevel)` (tao `platform_impl/macos/window.rs`). AppKit's
-documented default collection behaviour for *any* window above `NSNormalWindowLevel` is
-`NSWindowCollectionBehaviorTransient` — "floats across Spaces, hides in Exposé" — and that
-one default produces three separate-looking bug reports:
-
-- the widget does not appear in Mission Control;
-- it cannot be sent to another desktop;
-- after Cmd-Tabbing away there is no obvious way back to the desktop it was left on.
-
-`make_window_mission_control_visible` in `lib.rs` sets the behaviour explicitly to
-`Managed | FullScreenAuxiliary` on startup. `Managed` is Apple's "participates in Spaces
-and Exposé"; the three behaviours in that group (`Managed`, `Transient`, `Stationary`) are
-mutually exclusive and only a *default* when none is set, so asking for `Managed` keeps the
-floating window level while restoring ordinary window management.
-`FullScreenAuxiliary` lets the widget accompany a full-screen video instead of being left
-behind on the desktop Space.
-
-This needs one AppKit message send: Tauri exposes `set_visible_on_all_workspaces`
-(`CanJoinAllSpaces`) but nothing for the rest of `collectionBehavior`, and
-`CanJoinAllSpaces` solves a *different* problem — it pins the widget to every desktop at
-once, which is not the same as letting it be managed like a normal window. The call is
-cosmetic, so a failure is logged and startup continues.
-
-The app is *not* `LSUIElement` (see `Info.plist`), so it keeps a Dock icon and does appear
-in Cmd-Tab — which is worth knowing before anyone "fixes" Cmd-Tab by making it an accessory
-app, as that would remove it from the switcher entirely.
+**Permission is tied to the code signature.** Release builds are ad-hoc signed, so the cdhash
+changes on every build and the TCC grant evaporates while System Settings still lists the
+stale entry as enabled. Expect to hit the permission screen constantly in development and
+after every user-facing update; its copy is written to read as routine
+("Not hearing any audio") rather than as an accusation. A stable
+`codesign --identifier` helps but does not fix it; only a Developer ID would.
 
 **`libvosk.dylib` is fetched, not committed.** `scripts/fetch-libvosk-macos.sh` pulls
 Vosk's `universal2` wheel from PyPI (`vosk/libvosk.dyld` inside — note the odd `.dyld`
@@ -327,10 +307,10 @@ embeds — so the copy in `Contents/Frameworks` would be ignored. The script rew
 `@rpath/libvosk.dylib`, then **re-ad-hoc-signs it**, because `install_name_tool`
 invalidates the existing signature and an invalid signature is fatal on Apple Silicon.
 
-**Deployment target must be ≥ 11.0.** arm64 macOS does not exist below Big Sur, so a
-lower target is rejected outright when building for Apple Silicon. `10.15` will break the
-M-series job specifically while the Intel job passes — set in `tauri.macos.conf.json`,
-`Info.plist` and the workflow env, all three must agree.
+**Deployment target must be ≥ 14.4.** That is where Core Audio process taps became
+dependable, and system-audio capture is the whole app — there is no driverless route below
+it. Set in `tauri.macos.conf.json`, `Info.plist` (`LSMinimumSystemVersion`) and the workflow
+env; all three must agree.
 
 **Builds are per-architecture, not universal.** `ct2rs` CMake-builds CTranslate2 for the
 host arch only (it sets `CMAKE_OSX_ARCHITECTURES=arm64` itself), so a
@@ -347,10 +327,12 @@ right-click → Open, or `xattr -dr com.apple.quarantine`. `entitlements.plist` 
 whenever real Developer ID signing happens — under the hardened runtime,
 `disable-library-validation` is required or the app refuses to load `libvosk.dylib`.
 
-**Microphone permission.** A loopback device is an ordinary input device as far as TCC is
-concerned, so `NSMicrophoneUsageDescription` (in `src-tauri/Info.plist`, merged into the
-bundle by tauri-bundler) is mandatory — without it macOS kills the app the moment the
-stream starts rather than prompting.
+**Two TCC categories, two usage strings.** `NSAudioCaptureUsageDescription` gates the
+process tap; `NSMicrophoneUsageDescription` gates the microphone fallback. Both live in
+`src-tauri/Info.plist` and are merged into the bundle by tauri-bundler. They are *different*
+permissions — "System Audio Recording" and "Microphone" in System Settings — so reading one
+tells you nothing about the other. Omitting either is silent: the tap path denies without
+error, and the mic path kills the app the moment the stream starts.
 
 ---
 
@@ -387,4 +369,6 @@ streaming feel while still producing English output.
 |-------|-------|
 | Model loads twice on rapid start/stop | `drop(h)` doesn't wait for the thread; rapid toggle can start a new Vosk load before the old one exits. Fix: `h.join()` with a timeout, or a proper cancellation token. |
 | Vosk logs to stderr | `LOG (VoskAPI:...)` lines appear in the terminal. Suppress by redirecting stderr in the Vosk init, or setting `VOSK_LOG_LEVEL=0` env var. |
-| macOS loopback setup is manual | The user has to install BlackHole and build a Multi-Output Device by hand. Both steps are scriptable (see "macOS specifics" above: GUI-authorized pkg install + `AudioHardwareCreateAggregateDevice`), so an in-app guided flow could automate them. Alternatively, ScreenCaptureKit (macOS 13+) captures system audio driver-free, but requires the Screen Recording permission. |
+| macOS 14.4+ only | Core Audio process taps do not exist below 14.4, and the BlackHole fallback was deliberately deleted rather than maintained. A machine below the floor gets `audio_tap_unavailable` and the microphone fallback. Restoring older support would mean reinstating the whole loopback-driver path. |
+| TCC grant dies on every update | macOS ties the audio-recording permission to the code signature, and releases are ad-hoc signed, so updating the app silently revokes it while System Settings still shows it enabled. A Developer ID certificate is the only real fix; until then the permission screen is a routine part of the flow. |
+| Permission denial is detected heuristically | The tap API reports success even when denied, so the only signal is "buffers arriving, every sample bit-exact zero". `silence_verdict()` waits 6s before calling it. A genuinely silent 6s with nothing playing is indistinguishable in principle — it is only safe because the verdict clears permanently on the first non-zero sample. |

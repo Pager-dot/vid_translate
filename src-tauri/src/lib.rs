@@ -90,161 +90,6 @@ struct ModelDownloadProgress {
     error: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
-struct BlackHoleProgress {
-    status: String, // "downloading" | "installing" | "done" | "error"
-    downloaded: Option<u64>,
-    total: Option<u64>,
-    error: Option<String>,
-}
-
-// BlackHole 2ch, pinned by version and checksum. 2ch is the right variant: the capture
-// pipeline is stereo (see audio/macos.rs), and 16ch/64ch only add channels to route, each
-// of which macOS then offers as a capture channel the app would have to ignore.
-//
-// The URL is versioned, so it keeps resolving after upstream releases a newer BlackHole —
-// bumping it is a deliberate edit, not a silent moving target. The checksum is the one
-// Homebrew's blackhole-2ch cask pins for this file.
-#[cfg(target_os = "macos")]
-const BLACKHOLE_PKG_URL: &str = "https://existential.audio/downloads/BlackHole2ch-0.7.1.pkg";
-#[cfg(target_os = "macos")]
-const BLACKHOLE_PKG_SHA256: &str =
-    "57b540f27a3e29c37e310e01bee0fdfab76733087e47f997ef9dccf851400dcf";
-
-/// Downloads the official BlackHole 2ch package and installs it, so the setup screen's
-/// button does the whole job instead of sending the user to a web page.
-///
-/// A HAL plug-in lands in /Library/Audio/Plug-Ins, which no sandboxed app can write, so
-/// the install itself has to be authorized: osascript's `with administrator privileges`
-/// shows the standard macOS password prompt and runs installer(8) as root. Cancelling that
-/// prompt is a normal outcome, reported as an error the screen can retry from.
-#[tauri::command]
-fn install_blackhole(app: tauri::AppHandle) {
-    std::thread::spawn(move || {
-        let emit = |status: &str, downloaded: Option<u64>, total: Option<u64>, error: Option<String>| {
-            let _ = app.emit(
-                "blackhole_install_progress",
-                BlackHoleProgress {
-                    status: status.into(),
-                    downloaded,
-                    total,
-                    error,
-                },
-            );
-        };
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            emit("error", None, None, Some("BlackHole is macOS-only".into()));
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            if let Err(e) = install_blackhole_inner(&emit) {
-                emit("error", None, None, Some(e));
-            }
-        }
-    });
-}
-
-#[cfg(target_os = "macos")]
-fn install_blackhole_inner(
-    emit: &dyn Fn(&str, Option<u64>, Option<u64>, Option<String>),
-) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-
-    emit("downloading", Some(0), None, None);
-
-    let resp = ureq::get(BLACKHOLE_PKG_URL)
-        .call()
-        .map_err(|e| format!("download failed: {e}"))?;
-    let total = resp
-        .header("Content-Length")
-        .and_then(|s| s.parse::<u64>().ok());
-
-    let tmp_dir = std::env::temp_dir().join("vid_translate_blackhole");
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("cannot create temp dir: {e}"))?;
-    let pkg_path = tmp_dir.join("BlackHole2ch.pkg");
-
-    let mut reader = resp.into_reader();
-    let mut file =
-        std::fs::File::create(&pkg_path).map_err(|e| format!("cannot create temp file: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    let mut downloaded: u64 = 0;
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("download error: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        file.write_all(&buf[..n])
-            .map_err(|e| format!("write error: {e}"))?;
-        downloaded += n as u64;
-        emit("downloading", Some(downloaded), total, None);
-    }
-    file.flush().map_err(|e| format!("write error: {e}"))?;
-    drop(file);
-
-    // The download is about to be run as root, so a mismatch is fatal, never a warning.
-    let digest = format!("{:x}", hasher.finalize());
-    if digest != BLACKHOLE_PKG_SHA256 {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(format!(
-            "checksum mismatch — refusing to install (expected {BLACKHOLE_PKG_SHA256}, got {digest})"
-        ));
-    }
-
-    emit("installing", None, None, None);
-
-    // Via a script file rather than an inline command: the payload crosses two levels of
-    // quoting (AppleScript string, then shell) and a path embedded in both is easy to get
-    // wrong. coreaudiod is restarted because the installer asks for a reboot, which it
-    // does not actually need — the new driver is picked up when coreaudiod comes back.
-    let script_path = tmp_dir.join("install.sh");
-    std::fs::write(
-        &script_path,
-        format!(
-            "#!/bin/sh\nset -e\n/usr/sbin/installer -pkg {} -target /\n/usr/bin/killall coreaudiod\n",
-            shell_quote(&pkg_path.to_string_lossy())
-        ),
-    )
-    .map_err(|e| format!("cannot write install script: {e}"))?;
-
-    let applescript = format!(
-        "do shell script \"/bin/sh {}\" with administrator privileges",
-        shell_quote(&script_path.to_string_lossy()).replace('\\', "\\\\").replace('"', "\\\"")
-    );
-    let out = std::process::Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(&applescript)
-        .output()
-        .map_err(|e| format!("cannot run osascript: {e}"))?;
-
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        // -128 is the documented code for the user dismissing the authorization dialog.
-        if err.contains("-128") || err.to_lowercase().contains("user canceled") {
-            return Err("installation cancelled".into());
-        }
-        return Err(format!("install failed: {}", err.trim()));
-    }
-
-    emit("done", None, None, None);
-    Ok(())
-}
-
-/// Wraps a string in single quotes for /bin/sh, escaping any single quotes within.
-#[cfg(target_os = "macos")]
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// Recursively copies a directory tree. Used as a fallback when `rename` fails with
 /// EXDEV (source and destination on different filesystems/mount points, e.g. /tmp
 /// being tmpfs while the data dir is on disk).
@@ -639,8 +484,8 @@ fn start_listening(
     use_local_translation: Option<bool>,
     prefer_microphone: Option<bool>,
 ) {
-    // macOS only (a no-op elsewhere): set before the loopback check below, since opting into
-    // microphone capture is precisely what makes a missing loopback driver acceptable.
+    // macOS only (a no-op elsewhere): set before the preflight below, since opting into
+    // microphone capture is precisely what makes an unavailable system-audio tap acceptable.
     audio::set_prefer_microphone(prefer_microphone.unwrap_or(false));
 
     let mut pipeline = state.lock().unwrap();
@@ -658,11 +503,13 @@ fn start_listening(
     let use_local = use_local_translation.unwrap_or(false);
 
     let handle = std::thread::spawn(move || {
-        // On macOS there is no system-audio API, only virtual loopback drivers the user has
-        // to install themselves. Check first so a machine without one gets a setup screen
-        // rather than a session that "runs" but transcribes pure silence forever.
-        if audio::loopback_device_name().is_none() {
-            let _ = app_handle.emit("status", StatusEvent { state: "audio_setup_missing".into() });
+        // Refuse up front what is knowable up front (on macOS, the OS version), so an
+        // unsupported machine gets a setup screen rather than a session that "runs" and
+        // transcribes pure silence. Permission is deliberately *not* checked here: the tap
+        // API reports success even when denied, so that verdict can only come from the
+        // watchdog once audio should have been flowing.
+        if let Err(fault) = audio::preflight() {
+            let _ = app_handle.emit("status", StatusEvent { state: fault.status().into() });
             return;
         }
         match mode.as_str() {
@@ -684,6 +531,7 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
 
     let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
     let rx = audio::start_capture(stop_flag.clone());
+    spawn_capture_watchdog(app_handle.clone(), stop_flag.clone());
     let app_for_result = app_handle.clone();
     let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
 
@@ -880,6 +728,7 @@ fn run_translated_pipeline(
     });
 
     let rx = audio::start_capture(stop_flag.clone());
+    spawn_capture_watchdog(app_handle.clone(), stop_flag.clone());
     let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
 
     let app_for_partial = app_handle.clone();
@@ -1047,6 +896,39 @@ fn pull_model(app: tauri::AppHandle, model: String) {
     });
 }
 
+/// Watches for a capture fault and turns it into a setup screen.
+///
+/// Polled rather than pushed because the capture thread has no `AppHandle`, and because
+/// every fault is terminal for the session: a tap that was denied permission will never
+/// start working on its own. Stops the pipeline so the UI is not left showing "listening"
+/// over a dead stream.
+fn spawn_capture_watchdog(app: tauri::AppHandle, stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            if let Some(fault) = audio::capture_fault() {
+                eprintln!("[audio] capture fault: {fault:?}");
+                let _ = app.emit("status", StatusEvent { state: fault.status().into() });
+                stop.store(true, Ordering::Relaxed);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+}
+
+/// Opens System Settings at the pane holding the system-audio recording switch.
+///
+/// macOS ties this permission to the app's code signature, and release builds are ad-hoc
+/// signed, so the grant is lost on every update while the stale entry still reads as
+/// enabled — which makes "take me to the switch" a routine action rather than an edge case.
+#[tauri::command]
+fn open_audio_privacy_settings() {
+    let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture";
+    if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
+        eprintln!("[window] could not open privacy settings: {e}");
+    }
+}
+
 /// Opts the widget into Mission Control and Spaces despite being an always-on-top window.
 ///
 /// `alwaysOnTop` makes tao set `NSFloatingWindowLevel`, and AppKit's documented default for
@@ -1103,7 +985,7 @@ pub fn run() {
             download_vosk_model,
             download_ct2_model,
             local_model_exists,
-            install_blackhole,
+            open_audio_privacy_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

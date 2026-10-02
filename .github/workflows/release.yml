@@ -69,10 +69,11 @@ jobs:
       - name: Build (macOS)
         if: startsWith(matrix.platform, 'macos')
         env:
-          # Must match bundle.macOS.minimumSystemVersion. 11.0 rather than 10.15 because
-          # arm64 macOS does not exist below Big Sur — a lower target is rejected outright
-          # when building for Apple Silicon, and Intel Macs run 11.0 fine.
-          MACOSX_DEPLOYMENT_TARGET: '11.0'
+          # Must match bundle.macOS.minimumSystemVersion and Info.plist's
+          # LSMinimumSystemVersion. 14.4 is where Core Audio process taps became dependable,
+          # and system-audio capture is the whole point of the app — below that there is no
+          # driverless way to hear what the Mac is playing.
+          MACOSX_DEPLOYMENT_TARGET: '14.4'
         run: npm run tauri build -- --bundles app
 
       # Tauri only codesigns when a real identity is configured, so an unsigned .app comes out
@@ -234,13 +235,14 @@ jobs:
 
             - **Linux** — `.AppImage` (`chmod +x` it, then run) or `.deb`
             - **Windows** — `.msi` or `-setup.exe`
-            - **macOS** — `.dmg` (Apple Silicon only: M1, M2, M3, M4, incl. Pro/Max/Ultra)
+            - **macOS** — `.dmg` (Apple Silicon, macOS 14.4+)
 
             Speech models are downloaded from within the app on first use.
 
             **macOS notes** — the build is ad-hoc signed, not notarized, so Gatekeeper blocks
             it on first launch: right-click the app → **Open**, or run
             `xattr -dr com.apple.quarantine /Applications/VidTranslate.app`.
-            macOS also has no system-audio API, so capturing what your Mac plays needs a free
-            loopback driver — the app links to [BlackHole](https://existential.audio/blackhole/)
-            and walks you through it on first run.
+            macOS captures system audio through a Core Audio process tap — no driver and no
+            audio routing to set up. macOS asks for permission to record audio the first time
+            you start a session; it keeps working with any output device, including Bluetooth,
+            and while your output is muted. Requires macOS 14.4 or later.
