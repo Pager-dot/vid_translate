@@ -119,6 +119,46 @@ struct ClipResult {
     total_ms: u128,
 }
 
+/// Runs already-transcribed Japanese through the rest of the pipeline: chunker, then MT.
+///
+/// This is how a different recognizer gets compared against Vosk on equal terms. Whisper is
+/// not streaming — it emits finished, punctuated segments rather than a growing partial — so
+/// each line is fed as its own ASR final, which is the honest analogue of what the live
+/// pipeline would see. Everything downstream is the shipped code.
+fn run_text_clip(path: &Path, state: &MarianState) -> Result<ClipResult, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let stop_flag = AtomicBool::new(false);
+    let started = Instant::now();
+
+    let mut chunker = pick_chunker();
+    let mut chunks: Vec<Chunk> = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        chunks.extend(chunker.flush(line.trim()));
+    }
+
+    let mut pieces = Vec::new();
+    let mut latencies_ms = Vec::new();
+    let mut english_per_chunk = Vec::new();
+    for chunk in &chunks {
+        let t = Instant::now();
+        let english =
+            marian::translate_local_blocking("ja", &chunk.text, &stop_flag, state, |_| {});
+        latencies_ms.push(t.elapsed().as_millis());
+        english_per_chunk.push(english.clone());
+        if !english.is_empty() {
+            pieces.push(english);
+        }
+    }
+
+    Ok(ClipResult {
+        chunks,
+        english_per_chunk,
+        hypothesis: pieces.join(" "),
+        latencies_ms,
+        total_ms: started.elapsed().as_millis(),
+    })
+}
+
 fn run_clip(path: &Path, model_path: &str, state: &MarianState) -> Result<ClipResult, String> {
     let samples = read_wav_16k_mono(path)?;
     let stop_flag = AtomicBool::new(false);
@@ -198,17 +238,22 @@ fn p95(mut v: Vec<u128>) -> u128 {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: ja_eval <clip.wav> [clip.wav ...]");
+        eprintln!("usage: ja_eval <clip.wav|transcript.txt> [more ...]");
+        eprintln!("  a .txt input is Japanese already transcribed by another recognizer,");
+        eprintln!("  one ASR final per line — for comparing recognizers on equal terms");
         eprintln!("  VID_TRANSLATE_JA_MODEL_DIR overrides the MT model directory (Phase 4 A/B)");
         eprintln!("  VID_TRANSLATE_EVAL_CHUNKER=final-only reproduces the pre-chunker baseline");
         std::process::exit(2);
     }
 
+    let all_text = args
+        .iter()
+        .all(|a| Path::new(a).extension().and_then(|e| e.to_str()) == Some("txt"));
     let vosk_model = dirs::data_local_dir()
         .unwrap_or_else(|| ".".into())
         .join("vid_translate")
         .join("vosk-model-ja");
-    if !vosk_model.exists() {
+    if !all_text && !vosk_model.exists() {
         eprintln!(
             "no JA Vosk model at {} — start the app once in JA mode to download it",
             vosk_model.display()
@@ -225,7 +270,12 @@ fn main() {
     for arg in &args {
         let path = Path::new(arg);
         eprintln!("[ja_eval] {}", path.display());
-        match run_clip(path, &vosk_model, &state) {
+        let outcome = if path.extension().and_then(|e| e.to_str()) == Some("txt") {
+            run_text_clip(path, &state)
+        } else {
+            run_clip(path, &vosk_model, &state)
+        };
+        match outcome {
             Ok(r) => {
                 all_latencies.extend(r.latencies_ms.iter().copied());
                 let mean = if r.latencies_ms.is_empty() {
