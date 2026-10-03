@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use vid_translate_lib::chunker::{self, Chunk};
+use vid_translate_lib::chunker::{self, Chunk, ChunkStrategy, FinalOnlyChunker};
 use vid_translate_lib::marian::{self, MarianState};
 use vid_translate_lib::recognizer::{self, RecognitionResult};
 
@@ -78,6 +78,21 @@ fn read_wav_16k_mono(path: &Path) -> Result<Vec<i16>, String> {
     Err(format!("{}: no data chunk", path.display()))
 }
 
+/// The plan asks for the pre-change baseline to be recorded before the clause chunker is
+/// merged. It already is merged, so the baseline is reproduced here instead:
+/// `VID_TRANSLATE_EVAL_CHUNKER=final-only` runs the old translate-on-`Final`-only
+/// behaviour, letting both numbers be measured from the same build.
+///
+/// Deliberately read here and not in `chunker::for_language`: this is a measurement knob,
+/// and an env var that silently changes what the shipped app does is a different and worse
+/// thing than one that changes what the eval runner does.
+fn pick_chunker() -> Box<dyn ChunkStrategy> {
+    match std::env::var("VID_TRANSLATE_EVAL_CHUNKER").as_deref() {
+        Ok("final-only") => Box::new(FinalOnlyChunker::default()),
+        _ => chunker::for_language("ja", true),
+    }
+}
+
 struct ClipResult {
     chunks: Vec<Chunk>,
     hypothesis: String,
@@ -99,7 +114,7 @@ fn run_clip(path: &Path, model_path: &str, state: &MarianState) -> Result<ClipRe
     }
     drop(tx);
 
-    let mut chunker = chunker::for_language("ja", true);
+    let mut chunker = pick_chunker();
     let mut chunks: Vec<Chunk> = Vec::new();
     // (chunk index, when the chunk was cut) — latency is measured from the cut, since that
     // is the moment the pipeline could first have shown anything for those words.
@@ -155,6 +170,7 @@ fn main() {
     if args.is_empty() {
         eprintln!("usage: ja_eval <clip.wav> [clip.wav ...]");
         eprintln!("  VID_TRANSLATE_JA_MODEL_DIR overrides the MT model directory (Phase 4 A/B)");
+        eprintln!("  VID_TRANSLATE_EVAL_CHUNKER=final-only reproduces the pre-chunker baseline");
         std::process::exit(2);
     }
 

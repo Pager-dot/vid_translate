@@ -7,6 +7,8 @@
 #   ./eval/run.sh                     # score every clip in eval/ja
 #   ./eval/run.sh out/baseline        # write results to a named directory
 #   VID_TRANSLATE_JA_MODEL_DIR=... ./eval/run.sh out/fp32   # Phase 4 A/B
+#   VID_TRANSLATE_EVAL_CHUNKER=final-only ./eval/run.sh eval/out/baseline
+#                                     # the pre-chunker baseline, from this same build
 #
 # BLEU on 20-30 short clips is noisy. Treat it as a regression tripwire, not a leaderboard:
 # a 3-4 point swing is within the noise of this corpus, a 10 point drop is a real break.

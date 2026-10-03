@@ -116,8 +116,17 @@ only — the download story is untouched.
 
 ## Phase 5 — baseline
 
-Record the pre-change baseline **before** merging further chunker changes. See
-`eval/ja/README.md`.
+The clause chunker is already merged, so the baseline is reproduced rather than recorded
+before the fact — `VID_TRANSLATE_EVAL_CHUNKER=final-only` runs the old
+translate-on-`Final`-only behaviour from the same build, so both rows below come from one
+corpus and one model:
+
+```sh
+VID_TRANSLATE_EVAL_CHUNKER=final-only ./eval/run.sh eval/out/baseline
+./eval/run.sh eval/out/clause
+```
+
+See `eval/ja/README.md` for building the corpus.
 
 | run | clips | BLEU | chrF | latency mean | latency p95 | forced cuts |
 |---|---|---|---|---|---|---|
