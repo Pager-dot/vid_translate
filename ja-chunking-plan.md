@@ -93,7 +93,7 @@ the unit tests were written against:
 
 ---
 
-## 4. Whisper: evaluated, and it wins — so this is now an integration problem
+## 4. Whisper: evaluated, chosen, and shipped for Japanese
 
 Measured, not predicted. `whisper.cpp` v1.9.4, `ggml-small`, `-l ja`, with its Japanese fed
 through the *same* chunker and the *same* int8 model so the recognizer is the only variable:
@@ -118,11 +118,37 @@ detail.
 > segments, 62% of all segments duplicated, BLEU 10.02. `-mc 0` fixes it (5.3%, BLEU 14.15).
 > Ship without it and the caption bar chants one sentence for four minutes.
 
-### 4.1 The design decision to make first
+### 4.0 What shipped
+
+`recognizer::vosk` and `recognizer::whisper` now sit behind one interface, both presenting
+the same `Partial`/`Final`/`Silent` stream, so the chunker, the translator threads and the
+frontend were untouched by the swap. Japanese uses Whisper; **Spanish and English stay on
+Vosk** — they perform acceptably there and sub-second streaming is worth more to them than
+the accuracy difference, and ES has a standing byte-identical requirement.
+
+In-app streaming result on the vlog: **BLEU 25.06 / chrF 58.20**, against Vosk's 18.13 /
+53.40 and batch `whisper-cli`'s 26.35 / 58.57. So the sliding-window approximation costs
+1.3 BLEU against seeing the whole file, and gains 6.9 over what we had.
+
+Three things in `recognizer/whisper.rs` are load-bearing and should not be "simplified":
+
+1. `set_no_context(true)` — without it, repetition loops (260 identical segments on the
+   36-minute clip, BLEU 14.15 → 10.02).
+2. Text-level overlap stripping on commit — Whisper's segment end timestamps run short and
+   every pass re-segments from scratch, so syllables come back. Trimming the window by
+   timestamp alone does **not** fix this.
+3. Dropping segments by Whisper's own no-speech probability — it writes confident captions
+   over silence otherwise.
+
+### 4.1 The design decision that was made
 
 Whisper is **not streaming.** It emits finished, punctuated segments; Vosk emits a growing,
 revised partial. The `ChunkStrategy` contract and the Phase 3 self-correcting live line are
-both built on the latter. Pick one, deliberately, before writing code:
+both built on the latter.
+
+**Chosen: sliding window with synthesised partials**, no Vosk hybrid. The window is
+re-transcribed every 2s and segments commit once enough audio follows them. The options
+that were weighed:
 
 - **Sliding window, synthesised partials.** Keeps the live line and the self-correction.
   Costs: re-transcribing overlapping audio continuously, and partials that revise far more
@@ -131,9 +157,16 @@ both built on the latter. Pick one, deliberately, before writing code:
 - **Segment-at-a-time.** Much simpler, and whisper's segments are already clean sentences.
   Costs ~1–2s added latency and **loses the live line you just built**.
 
-A plausible third option: Whisper for the committed history line, Vosk kept alive purely to
-drive the low-latency live line. Two recognizers running is more CPU, but it is the only
-shape that keeps both the accuracy and the responsiveness.
+A plausible third option, **not taken**: Whisper for the committed history line, Vosk kept
+alive purely to drive the low-latency live line. Two recognizers running is more CPU, but it
+is the only shape that keeps both the accuracy and the sub-second responsiveness. It remains
+the fallback if ~2.5s to first text turns out to feel too slow in use — the backend
+interface makes it a small change rather than a rewrite.
+
+> **Keep in consideration:** the Phase 3 self-correcting live line still exists in the
+> frontend and is still used by Spanish, but Japanese no longer produces the rapid partials
+> it was built for. Whisper's partial updates once per 2s step. If JA feels static, that
+> is why, and the hybrid above is the answer rather than tuning the chunker.
 
 ### 4.2 What the clause chunker becomes
 
@@ -150,7 +183,19 @@ With punctuated input, most of `chunker::japanese` stops being load-bearing:
   segments already end at natural pauses rather than mid-clause. Re-sweep before assuming
   anything.
 
-### 4.3 Model size and packaging
+### 4.3 Still open after the switch
+
+- **Windows and Linux are unmeasured.** ~25% of one core at a 2s step on Apple Silicon with
+  Metal. Whisper-rs is built here with the `metal` feature; the other targets will fall back
+  to CPU and may not keep up. **This is a shipping blocker.**
+- **No real-time latency measurement of the Whisper path.** The ~2.5s figure is computed
+  from per-pass inference timings, not observed end to end. `VID_TRANSLATE_EVAL_REALTIME=1`
+  now works with either backend, so this is one run away.
+- **Guard table is stale.** `DEFAULT_MIN_CHUNK_CHARS = 50` was swept against Vosk's
+  unpunctuated, morpheme-spaced output. Whisper's segments are already sentences, so the
+  clause scanner barely fires and the number is close to inert. Re-sweep or simplify.
+
+### 4.4 Model size and packaging
 
 `ggml-small` is 487MB against Vosk JA's 48MB, on top of a download/bundling story that is
 already known-bad. `medium`/`large-v3-turbo` were not tested — `small` already wins

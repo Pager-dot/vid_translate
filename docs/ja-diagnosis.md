@@ -200,6 +200,59 @@ the model is not being handed broken clauses in the first place.
 36 minutes of audio in 5:43 wall (`small`, Apple Silicon, ~6.3x realtime). Real-time
 feasible with headroom on this machine; still unmeasured on the Windows/Linux targets.
 
+Per-pass cost, which is what actually matters for a streaming implementation:
+
+| audio in the window | encode | total (model warm) |
+|---|---|---|
+| 3s | 403ms | ~580ms |
+| 5s | 325ms | ~560ms |
+| 10s | 419ms | ~860ms |
+
+Transcribing 3 seconds costs about what 10 seconds costs, because the encoder always runs
+on a zero-padded 30-second window. **Cost is per pass, not per second of audio.** So the
+step size sets both latency and CPU load, and there is nothing to gain from a smaller
+window:
+
+| step | latency to a committed line | CPU |
+|---|---|---|
+| 1s | ~1.5s | ~50% of a core |
+| **2s (shipped)** | **~2.5s** | **~25%** |
+| 3s | ~3.5s | ~17% |
+
+### Shipped: the streaming implementation costs 1.3 BLEU against offline batch
+
+`recognizer::whisper` manufactures the streaming contract (sliding window, re-transcribed
+every 2s, segments committed once enough audio follows them). That approximation is not
+free, but it is close:
+
+| vlog | chunks | BLEU | chrF |
+|---|---|---|---|
+| Vosk, as shipped before | 73 | 18.13 | 53.40 |
+| `whisper-cli`, whole file at once | 118 | 26.35 | 58.57 |
+| **Whisper, in-app streaming** | **147** | **25.06** | **58.20** |
+
++6.9 BLEU over Vosk, and within 1.3 of what batch Whisper gets with the entire file in
+front of it. The gap is the price of not being able to see the future.
+
+### Latency after the switch
+
+Measured on the Vosk pipeline with the audio paced in real time
+(`VID_TRANSLATE_EVAL_REALTIME=1`), against the computed Whisper figures:
+
+| | Vosk (measured) | Whisper @ 2s step |
+|---|---|---|
+| first text appears | 470ms mean, 1.35s p95 | ~2.5s |
+| line stops changing | 6.2s mean, **8.8s p95** | **~2.5s, flat** |
+
+Latency changes character rather than simply getting worse. The sub-second provisional line
+is gone; in exchange a committed line arrives at a flat ~2.5s instead of a mean of 6.2s and
+a p95 of 8.8s, because the wait no longer depends on when the speaker happens to pause.
+
+Note that the 6.2s/8.8s figures are partly self-inflicted: `DEFAULT_MIN_CHUNK_CHARS` was
+raised to 50 for quality and validated only against BLEU, never against the clock. At 4.4
+chars/sec that threshold is ~11 seconds of speech. With Whisper the question is largely
+moot — its punctuation makes the character-count guard almost irrelevant.
+
 ---
 
 ## Phase 4 — quantization A/B
@@ -231,4 +284,5 @@ that is currently broken. Do not change the default without a number here.
 | ES→EN | unchanged, verified by a 2000-case equivalence fuzz against the original algorithm |
 | JA chunking | correct and clause-aligned, tuned to where it costs no quality; a latency win |
 | JA re-translating live line | works — the line visibly self-corrects as a sentence completes |
-| JA quality | **limited by Vosk.** Whisper small nearly triples BLEU on multi-speaker audio; the swap is now an integration problem, not an open question |
+| JA recognition | **Whisper (`ggml-small`), shipped.** +6.9 BLEU over Vosk in-app; ES and EN stay on Vosk |
+| JA live line | gone — Whisper has no growing partial. Committed lines arrive at a flat ~2.5s instead |
