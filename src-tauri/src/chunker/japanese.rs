@@ -31,13 +31,18 @@ use std::time::{Duration, Instant};
 
 use super::{Chunk, ChunkStrategy};
 
-/// Never emit a sliver: a boundary inside this many characters is ignored and accumulation
-/// continues. 6 chars is roughly the shortest standalone JA clause that still carries a
-/// predicate (`わかりました` is exactly 6).
+/// The shortest clause that can be read as closing: 6 chars is roughly the shortest
+/// standalone JA clause that still carries a predicate (`わかりました` is exactly 6). This
+/// is a linguistic floor used when deciding whether an *ambiguous* marker is clause-final,
+/// and is independent of how short a chunk is allowed to be — that is
+/// `DEFAULT_MIN_CHUNK_CHARS`, which is much larger and was measured, not reasoned about.
 pub const MIN_CHUNK_CHARS: usize = 6;
 
-/// Hard ceiling before a forced cut. ~60 chars is about one long spoken sentence; past that
-/// the model's output quality falls off anyway and the user has been waiting too long.
+/// Never emit a sliver: a boundary inside this many characters is ignored and accumulation
+/// continues.
+pub const DEFAULT_MIN_CHUNK_CHARS: usize = 6;
+
+/// Hard ceiling before a forced cut. ~60 chars is about one long spoken sentence.
 pub const MAX_CHUNK_CHARS: usize = 60;
 
 /// Time-based forced flush, measured from the last emit. This is what preserves
@@ -70,7 +75,11 @@ const TIER_C_AMBIGUOUS: &[&str] = &["が", "し"];
 /// Tier D — te-form. Cut after a `て`/`で`, except when what follows is a continuing
 /// auxiliary (`〜ている`, `〜ておく`, `〜てしまう`, `〜てみる`, `〜てある`) — there the
 /// predicate has not landed yet.
-const TE_FORM_CONTINUES: &[char] = &['い', 'く', 'お', 'み', 'し', 'あ'];
+/// `き` covers both `できる`/`できます` (where the `で` is not a te-form at all) and the
+/// `〜てきます` auxiliary; `も` and `は` cover `〜ても`/`〜では`, which continue the clause.
+/// Observed on real input: `見ることができます` was cut `...ことがで` | `きます`, and
+/// `飛んでも...` was cut `とんで` | `も...`.
+const TE_FORM_CONTINUES: &[char] = &['い', 'く', 'お', 'み', 'し', 'あ', 'き', 'も', 'は'];
 
 /// Words that merely *end* in `て`/`で` while being clause-**initial** connectives. They
 /// lead the clause that follows them, Spanish-style, so cutting after one strands it at the
@@ -194,6 +203,9 @@ fn verdict_at(tail: &[char], i: usize, at_final: bool) -> Verdict {
             if rest.is_empty() {
                 return if at_final { Verdict::No } else { Verdict::NeedLookahead };
             }
+            // Kept as the constant, not the tunable guard: this is a linguistic floor on
+            // how much clause has to precede an ambiguous marker before it can be read as
+            // clause-final, which is a separate question from how short a chunk may be.
             if i < MIN_CHUNK_CHARS {
                 return Verdict::No;
             }
@@ -256,8 +268,8 @@ fn classify_following(rest: &[char], at_final: bool) -> Following {
 }
 
 /// The earliest real clause boundary at or after `MIN_CHUNK_CHARS`.
-fn find_boundary(tail: &[char], at_final: bool) -> Option<usize> {
-    for i in MIN_CHUNK_CHARS..=tail.len() {
+fn find_boundary(tail: &[char], at_final: bool, min_chunk_chars: usize) -> Option<usize> {
+    for i in min_chunk_chars..=tail.len() {
         match verdict_at(tail, i, at_final) {
             Verdict::Cut(cut) => return Some(cut),
             Verdict::NeedLookahead => return None,
@@ -271,9 +283,9 @@ fn find_boundary(tail: &[char], at_final: bool) -> Option<usize> {
 /// of any tier within `limit`, falling back to `limit` itself. Lookahead rules are ignored
 /// here — we are out of time either way, and ending on a marker still beats ending
 /// mid-predicate.
-fn find_forced_cut(tail: &[char], limit: usize) -> usize {
+fn find_forced_cut(tail: &[char], limit: usize, min_chunk_chars: usize) -> usize {
     let limit = limit.min(tail.len());
-    for i in (MIN_CHUNK_CHARS..=limit).rev() {
+    for i in (min_chunk_chars..=limit).rev() {
         if let Verdict::Cut(cut) = verdict_at(&tail[..limit], i, true) {
             return cut;
         }
@@ -281,7 +293,28 @@ fn find_forced_cut(tail: &[char], limit: usize) -> usize {
     limit
 }
 
+/// The three tuning guards, as values rather than constants so a sweep can measure them
+/// instead of arguing about them. Production uses `Guards::default()`, which is exactly the
+/// constants above.
+#[derive(Debug, Clone, Copy)]
+pub struct Guards {
+    pub min_chunk_chars: usize,
+    pub max_chunk_chars: usize,
+    pub max_wait_ms: u64,
+}
+
+impl Default for Guards {
+    fn default() -> Self {
+        Self {
+            min_chunk_chars: DEFAULT_MIN_CHUNK_CHARS,
+            max_chunk_chars: MAX_CHUNK_CHARS,
+            max_wait_ms: MAX_WAIT_MS,
+        }
+    }
+}
+
 pub struct JapaneseChunker {
+    guards: Guards,
     /// The de-spaced text of the current utterance, as chars.
     text: Vec<char>,
     /// How many of `text` have been emitted.
@@ -296,7 +329,17 @@ pub struct JapaneseChunker {
 
 impl JapaneseChunker {
     pub fn new() -> Self {
-        Self { text: Vec::new(), consumed: 0, last_emit: Instant::now(), revisions: 0 }
+        Self::with_guards(Guards::default())
+    }
+
+    pub fn with_guards(guards: Guards) -> Self {
+        Self { guards, text: Vec::new(), consumed: 0, last_emit: Instant::now(), revisions: 0 }
+    }
+
+    /// The unconsumed tail, empty when a revised partial came back shorter than what has
+    /// already been emitted.
+    fn tail_slice(&self) -> &[char] {
+        self.text.get(self.consumed..).unwrap_or(&[])
     }
 
     /// `push_partial` with an injectable clock, so the `MAX_WAIT_MS` guard is testable.
@@ -304,37 +347,44 @@ impl JapaneseChunker {
         let despaced: Vec<char> = partial.split_whitespace().flat_map(|w| w.chars()).collect();
 
         // Vosk re-ranks partials, so the new text may not extend what we already emitted.
-        if despaced.len() < self.consumed || despaced[..self.consumed] != self.text[..self.consumed]
+        // `consumed` is therefore treated as "this many characters have already been shown
+        // to the user", never as a prefix that is still believed to match: it is only ever
+        // advanced by an emit. Re-deriving it from the text would re-emit words the user
+        // has already read, which is a worse failure than leaving a revised prefix
+        // uncorrected — and the live line (which re-translates the whole tail) is what
+        // actually keeps the visible text honest.
+        if despaced.len() < self.consumed
+            || despaced[..self.consumed.min(despaced.len())]
+                != self.text[..self.consumed.min(self.text.len())]
         {
             if !self.text.is_empty() {
                 self.revisions += 1;
             }
-            self.consumed = self.consumed.min(despaced.len());
         }
         self.text = despaced;
 
         let mut out = Vec::new();
         loop {
-            let tail = &self.text[self.consumed..];
-            if tail.len() < MIN_CHUNK_CHARS {
+            let tail = self.tail_slice();
+            if tail.len() < self.guards.min_chunk_chars {
                 break;
             }
-            if let Some(cut) = find_boundary(tail, false) {
+            if let Some(cut) = find_boundary(tail, false, self.guards.min_chunk_chars) {
                 out.push(Chunk::confident(tail[..cut].iter().collect::<String>()));
                 self.consumed += cut;
                 self.last_emit = now;
                 continue;
             }
             // No real boundary. Fall through to the guards.
-            if tail.len() >= MAX_CHUNK_CHARS {
-                let cut = find_forced_cut(tail, MAX_CHUNK_CHARS);
+            if tail.len() >= self.guards.max_chunk_chars {
+                let cut = find_forced_cut(tail, self.guards.max_chunk_chars, self.guards.min_chunk_chars);
                 out.push(Chunk::forced(tail[..cut].iter().collect::<String>()));
                 self.consumed += cut;
                 self.last_emit = now;
                 continue;
             }
-            if now.duration_since(self.last_emit) >= Duration::from_millis(MAX_WAIT_MS) {
-                let cut = find_forced_cut(tail, tail.len());
+            if now.duration_since(self.last_emit) >= Duration::from_millis(self.guards.max_wait_ms) {
+                let cut = find_forced_cut(tail, tail.len(), self.guards.min_chunk_chars);
                 out.push(Chunk::forced(tail[..cut].iter().collect::<String>()));
                 self.consumed += cut;
                 self.last_emit = now;
@@ -362,17 +412,21 @@ impl ChunkStrategy for JapaneseChunker {
     fn flush(&mut self, final_text: &str) -> Vec<Chunk> {
         let despaced: Vec<char> =
             final_text.split_whitespace().flat_map(|w| w.chars()).collect();
-        // The final text is authoritative; trust the consumed count only as far as it still
-        // matches, since Vosk may have re-ranked the prefix we already sent.
-        let mut consumed = self.consumed.min(despaced.len());
+        // Skip exactly as many characters as have already been emitted. Checking whether
+        // the final's prefix still matches and resetting to 0 when it does not — which is
+        // what this did first — re-emitted the whole utterance every time Vosk re-ranked a
+        // single character of it. On a 7.7-minute sample that produced 224 chunks for ~125
+        // utterances, with whole sentences translated and shown twice.
+        let consumed = self.consumed.min(despaced.len());
         if despaced[..consumed] != self.text[..consumed.min(self.text.len())] {
-            consumed = 0;
+            self.revisions += 1;
         }
+        let mut consumed = consumed;
 
         let mut out = Vec::new();
         while consumed < despaced.len() {
             let tail = &despaced[consumed..];
-            match find_boundary(tail, true) {
+            match find_boundary(tail, true, self.guards.min_chunk_chars) {
                 Some(cut) if cut < tail.len() => {
                     out.push(Chunk::confident(tail[..cut].iter().collect::<String>()));
                     consumed += cut;
@@ -388,7 +442,7 @@ impl ChunkStrategy for JapaneseChunker {
     }
 
     fn pending_tail(&self) -> String {
-        self.text[self.consumed.min(self.text.len())..].iter().collect()
+        self.tail_slice().iter().collect()
     }
 
     fn reset(&mut self) {
@@ -403,14 +457,23 @@ impl ChunkStrategy for JapaneseChunker {
 mod tests {
     use super::*;
 
+    /// The guards the *rule* tests run under. Boundary-rule behaviour is a separate
+    /// question from how short a chunk may be, and the shipped minimum (50) is far longer
+    /// than the textbook sentences those rules are stated in terms of, so pinning the
+    /// minimum to the linguistic floor keeps each test about one thing.
+    fn rule_guards() -> Guards {
+        Guards { min_chunk_chars: MIN_CHUNK_CHARS, ..Guards::default() }
+    }
+
     /// Feeds the whole string as one partial, then flushes — the shape most of the table
     /// cases care about.
     fn chunks(input: &str) -> Vec<Chunk> {
-        let mut c = JapaneseChunker::new();
+        let mut c = JapaneseChunker::with_guards(rule_guards());
         let mut out = c.push_partial(input);
         out.extend(c.flush(input));
         out
     }
+
 
     fn texts(input: &str) -> Vec<String> {
         chunks(input).into_iter().map(|c| c.text).collect()
@@ -419,7 +482,7 @@ mod tests {
     /// Feeds the string one character at a time, the way Vosk grows a partial.
     fn chunks_streamed(input: &str) -> Vec<Chunk> {
         let all: Vec<char> = input.chars().collect();
-        let mut c = JapaneseChunker::new();
+        let mut c = JapaneseChunker::with_guards(rule_guards());
         let mut out = Vec::new();
         for n in 1..=all.len() {
             let partial: String = all[..n].iter().collect();
@@ -493,7 +556,7 @@ mod tests {
     fn forced_cut_at_max_chars_is_not_confident() {
         // A long run of characters with no marker anywhere.
         let long: String = "ア".repeat(MAX_CHUNK_CHARS * 2);
-        let mut c = JapaneseChunker::new();
+        let mut c = JapaneseChunker::with_guards(rule_guards());
         let out = c.push_partial(&long);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|ch| !ch.boundary_confident));
@@ -502,7 +565,7 @@ mod tests {
 
     #[test]
     fn wait_timeout_forces_a_flush() {
-        let mut c = JapaneseChunker::new();
+        let mut c = JapaneseChunker::with_guards(rule_guards());
         let t0 = Instant::now();
         // Short, no boundary, well under the char ceiling.
         assert!(c.push_partial_at("そのあたりのこと", t0).is_empty());
@@ -550,18 +613,57 @@ mod tests {
 
     #[test]
     fn pending_tail_is_the_unconsumed_remainder() {
-        let mut c = JapaneseChunker::new();
+        let mut c = JapaneseChunker::with_guards(rule_guards());
         c.push_partial("映画を見たから楽しか");
         assert_eq!(c.pending_tail(), "楽しか");
     }
 
     #[test]
     fn revised_partial_is_counted_and_does_not_panic() {
-        let mut c = JapaneseChunker::new();
+        let mut c = JapaneseChunker::with_guards(rule_guards());
         c.push_partial("映画を見たから楽しかった");
         // Vosk re-ranks the prefix it already gave us.
         c.push_partial("映画を見てから楽しかった");
         assert_eq!(c.revisions, 1);
+    }
+
+    #[test]
+    fn a_revised_final_never_re_emits_what_was_already_shown() {
+        // The failure this guards against, measured on a 7.7-minute sample: Vosk re-ranks
+        // one character of the utterance on `Final`, the prefix no longer matches, and the
+        // entire utterance is emitted a second time — translated twice and shown twice.
+        let mut c = JapaneseChunker::with_guards(rule_guards());
+        let emitted = c.push_partial("映画を見たから楽しかったです");
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].text, "映画を見たから");
+
+        // `見た` -> `見て`: same length, different characters, inside the part already sent.
+        let rest = c.flush("映画を見てから楽しかったです");
+        assert_eq!(
+            rest.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["楽しかったです"],
+            "flush re-emitted text the user had already read"
+        );
+    }
+
+    #[test]
+    fn a_shorter_revised_partial_emits_nothing_new() {
+        let mut c = JapaneseChunker::with_guards(rule_guards());
+        assert_eq!(c.push_partial("映画を見たから楽しかった").len(), 1);
+        // Vosk shrinks the partial below what has already been emitted.
+        assert!(c.push_partial("映画を").is_empty());
+        assert_eq!(c.pending_tail(), "");
+    }
+
+    #[test]
+    fn de_inside_dekimasu_is_not_a_te_form() {
+        // `見ることができます` was cut `...ことがで` | `きます`.
+        assert_eq!(
+            texts("上から横浜の街を見ることができます"),
+            vec!["上から横浜の街を見ることができます"]
+        );
+        // `〜ても` / `〜では` continue the clause too.
+        assert_eq!(texts("飛んではいないですね"), vec!["飛んではいないですね"]);
     }
 
     #[test]
@@ -613,7 +715,10 @@ pub mod tests_support {
     pub fn chunk_all(input: &str) -> Vec<Chunk> {
         let despaced: String = input.split_whitespace().collect();
         let all: Vec<char> = despaced.chars().collect();
-        let mut c = JapaneseChunker::new();
+        let mut c = JapaneseChunker::with_guards(super::Guards {
+            min_chunk_chars: super::MIN_CHUNK_CHARS,
+            ..Default::default()
+        });
         let mut out = Vec::new();
         for n in 1..=all.len() {
             let partial: String = all[..n].iter().collect();
@@ -623,3 +728,4 @@ pub mod tests_support {
         out
     }
 }
+
