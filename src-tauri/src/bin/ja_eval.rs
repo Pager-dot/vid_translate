@@ -21,6 +21,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use vid_translate_lib::chunker::japanese::{Guards, JapaneseChunker};
 use vid_translate_lib::chunker::{self, Chunk, ChunkStrategy, FinalOnlyChunker};
 use vid_translate_lib::marian::{self, MarianState};
 use vid_translate_lib::recognizer::{self, RecognitionResult};
@@ -87,16 +88,33 @@ fn read_wav_16k_mono(path: &Path) -> Result<Vec<i16>, String> {
 /// and an env var that silently changes what the shipped app does is a different and worse
 /// thing than one that changes what the eval runner does.
 fn pick_chunker() -> Box<dyn ChunkStrategy> {
-    match std::env::var("VID_TRANSLATE_EVAL_CHUNKER").as_deref() {
-        Ok("final-only") => Box::new(FinalOnlyChunker::default()),
-        _ => chunker::for_language("ja", true),
+    if let Ok("final-only") = std::env::var("VID_TRANSLATE_EVAL_CHUNKER").as_deref() {
+        return Box::new(FinalOnlyChunker::default());
+    }
+    // The three guards are swept rather than argued about: VID_TRANSLATE_EVAL_GUARDS is
+    // "min,max,wait_ms". Unset means production defaults.
+    match std::env::var("VID_TRANSLATE_EVAL_GUARDS") {
+        Ok(spec) => {
+            let parts: Vec<&str> = spec.split(',').collect();
+            let d = Guards::default();
+            let guards = Guards {
+                min_chunk_chars: parts.first().and_then(|v| v.parse().ok()).unwrap_or(d.min_chunk_chars),
+                max_chunk_chars: parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(d.max_chunk_chars),
+                max_wait_ms: parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(d.max_wait_ms),
+            };
+            eprintln!("[ja_eval] guards {guards:?}");
+            Box::new(JapaneseChunker::with_guards(guards))
+        }
+        Err(_) => chunker::for_language("ja", true),
     }
 }
 
 struct ClipResult {
     chunks: Vec<Chunk>,
+    /// English for each chunk, index-aligned with `chunks`.
+    english_per_chunk: Vec<String>,
     hypothesis: String,
-    /// End-to-end latency per chunk: audio-fed-to-recognizer → English available.
+    /// Per-chunk translate time. Not end-to-end latency — see the note at the call site.
     latencies_ms: Vec<u128>,
     total_ms: u128,
 }
@@ -116,8 +134,7 @@ fn run_clip(path: &Path, model_path: &str, state: &MarianState) -> Result<ClipRe
 
     let mut chunker = pick_chunker();
     let mut chunks: Vec<Chunk> = Vec::new();
-    // (chunk index, when the chunk was cut) — latency is measured from the cut, since that
-    // is the moment the pipeline could first have shown anything for those words.
+    // When each chunk was cut. Kept for ordering only: see the note on `latencies_ms`.
     let mut cut_at: Vec<Instant> = Vec::new();
 
     recognizer::run(model_path, rx, |ev| match ev {
@@ -138,10 +155,22 @@ fn run_clip(path: &Path, model_path: &str, state: &MarianState) -> Result<ClipRe
 
     let mut pieces = Vec::new();
     let mut latencies_ms = Vec::new();
-    for (chunk, cut) in chunks.iter().zip(&cut_at) {
+    // Per-chunk English, kept beside its source chunk. This is what makes the "was it bad
+    // ASR or bad MT?" question answerable from the output alone: a chunk whose Japanese is
+    // already wrong tells you nothing about the model, and the two can only be told apart
+    // when they sit side by side.
+    let mut english_per_chunk = Vec::new();
+    for (chunk, _cut) in chunks.iter().zip(&cut_at) {
+        // Translate time per chunk, not cut-to-shown. Offline the entire clip is fed to the
+        // recognizer at once, so every chunk is cut within a second or two and then waits
+        // its turn in a serial translate loop: a cut-to-shown number here measures the
+        // backlog of that burst, not anything a user would experience. End-to-end latency
+        // needs the audio paced in real time, which this harness deliberately does not do.
+        let t = Instant::now();
         let english =
             marian::translate_local_blocking("ja", &chunk.text, &stop_flag, state, |_| {});
-        latencies_ms.push(cut.elapsed().as_millis());
+        latencies_ms.push(t.elapsed().as_millis());
+        english_per_chunk.push(english.clone());
         if !english.is_empty() {
             pieces.push(english);
         }
@@ -149,6 +178,7 @@ fn run_clip(path: &Path, model_path: &str, state: &MarianState) -> Result<ClipRe
 
     Ok(ClipResult {
         chunks,
+        english_per_chunk,
         hypothesis: pieces.join(" "),
         latencies_ms,
         total_ms: started.elapsed().as_millis(),
@@ -206,14 +236,15 @@ fn main() {
                 let out = serde_json::json!({
                     "clip": path.file_name().and_then(|s| s.to_str()).unwrap_or(arg),
                     "hypothesis": r.hypothesis,
-                    "chunks": r.chunks.iter().map(|c| serde_json::json!({
+                    "chunks": r.chunks.iter().zip(&r.english_per_chunk).map(|(c, en)| serde_json::json!({
                         "source": c.text,
+                        "english": en,
                         "boundary_confident": c.boundary_confident,
                     })).collect::<Vec<_>>(),
                     "chunk_count": r.chunks.len(),
                     "forced_cuts": r.chunks.iter().filter(|c| !c.boundary_confident).count(),
-                    "latency_mean_ms": mean,
-                    "latency_p95_ms": p95(r.latencies_ms),
+                    "mt_mean_ms": mean,
+                    "mt_p95_ms": p95(r.latencies_ms),
                     "total_ms": r.total_ms,
                 });
                 println!("{out}");
@@ -227,7 +258,7 @@ fn main() {
 
     let n = all_latencies.len();
     eprintln!(
-        "[ja_eval] {} clip(s), {} chunk(s), mean {}ms, p95 {}ms{}",
+        "[ja_eval] {} clip(s), {} chunk(s), MT mean {}ms, MT p95 {}ms{}",
         args.len() - failures,
         n,
         if n == 0 { 0 } else { all_latencies.iter().sum::<u128>() / n as u128 },
