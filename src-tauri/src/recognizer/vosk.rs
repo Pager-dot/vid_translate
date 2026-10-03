@@ -1,13 +1,8 @@
+//! The natively-streaming backend. Still the recognizer for Spanish and English.
+
 use vosk::{DecodingState, Model, Recognizer};
 
-pub enum RecognitionResult {
-    /// Words being spoken right now (unstable, updates rapidly)
-    Partial(String),
-    /// Completed utterance (stable, ready to display)
-    Final(String),
-    /// Silence or noise
-    Silent,
-}
+use super::RecognitionResult;
 
 /// Run the Vosk streaming recognizer on audio chunks from `rx`.
 /// Calls `on_result` synchronously for every chunk — Vosk is fast enough

@@ -70,6 +70,29 @@ fn vosk_ja_model_path() -> std::path::PathBuf {
         .join("vosk-model-ja")
 }
 
+/// Whisper replaced Vosk for Japanese: on multi-speaker audio Vosk lost about a third of
+/// the speech outright (BLEU 5.03 vs 14.15 end-to-end — see docs/ja-diagnosis.md). One
+/// ggml file rather than a directory, unlike the Vosk models.
+///
+/// `small` and not `medium`/`large`: it already won decisively, it runs ~6x realtime on
+/// Apple Silicon, and it is 487MB against the 48MB Vosk model it replaces — which is
+/// already uncomfortable for the download story.
+pub const WHISPER_JA_MODEL_FILE: &str = "ggml-small.bin";
+pub const WHISPER_JA_MODEL_URL: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
+
+fn whisper_ja_model_path() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("VID_TRANSLATE_WHISPER_MODEL") {
+        // Lets a different size be A/B'd without touching the download story, the same way
+        // VID_TRANSLATE_JA_MODEL_DIR works for the translation model.
+        return std::path::PathBuf::from(dir);
+    }
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("vid_translate")
+        .join(WHISPER_JA_MODEL_FILE)
+}
+
 fn vosk_es_model_path() -> std::path::PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -403,6 +426,99 @@ fn local_model_exists(lang: String) -> bool {
     marian::is_model_downloaded(&lang)
 }
 
+#[tauri::command]
+fn whisper_model_exists() -> bool {
+    whisper_ja_model_path().exists()
+}
+
+/// Downloads the Whisper model for Japanese. A single 487MB file, so unlike the Vosk and
+/// CT2 downloads there is no archive to unpack and no file set to iterate — but the size
+/// means the progress events matter more, not less.
+#[tauri::command]
+fn download_whisper_model(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let emit = |status: &str, downloaded: Option<u64>, total: Option<u64>, error: Option<String>| {
+            let _ = app.emit(
+                "whisper_download_progress",
+                ModelDownloadProgress {
+                    kind: "whisper-ja".into(),
+                    status: status.into(),
+                    downloaded,
+                    total,
+                    error,
+                },
+            );
+        };
+
+        let dest = whisper_ja_model_path();
+        if dest.exists() {
+            emit("done", None, None, None);
+            return;
+        }
+
+        emit("downloading", Some(0), None, None);
+        let resp = match ureq::get(WHISPER_JA_MODEL_URL).call() {
+            Ok(r) => r,
+            Err(e) => {
+                emit("error", None, None, Some(format!("download failed: {e}")));
+                return;
+            }
+        };
+        let total = resp
+            .header("Content-Length")
+            .and_then(|s| s.parse::<u64>().ok());
+
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                emit("error", None, None, Some(format!("cannot create model dir: {e}")));
+                return;
+            }
+        }
+        // Download to a temporary name and rename on success, so an interrupted download
+        // cannot leave a half-written file that `whisper_model_exists` then reports as
+        // present and the recognizer fails to load mid-session.
+        let tmp = dest.with_extension("bin.part");
+        let mut file = match std::fs::File::create(&tmp) {
+            Ok(f) => f,
+            Err(e) => {
+                emit("error", None, None, Some(format!("cannot create {}: {e}", tmp.display())));
+                return;
+            }
+        };
+
+        let mut reader = resp.into_reader();
+        let mut buf = [0u8; 65536];
+        let mut downloaded: u64 = 0;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Err(e) = file.write_all(&buf[..n]) {
+                        emit("error", None, None, Some(format!("write failed: {e}")));
+                        let _ = std::fs::remove_file(&tmp);
+                        return;
+                    }
+                    downloaded += n as u64;
+                    emit("downloading", Some(downloaded), total, None);
+                }
+                Err(e) => {
+                    emit("error", None, None, Some(format!("read failed: {e}")));
+                    let _ = std::fs::remove_file(&tmp);
+                    return;
+                }
+            }
+        }
+        drop(file);
+
+        if let Err(e) = std::fs::rename(&tmp, &dest) {
+            emit("error", None, None, Some(format!("could not finalise model file: {e}")));
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        emit("done", Some(downloaded), total, None);
+    });
+}
+
 /// Streams a single-shot translation from Ollama (cloud if a key is given, else local
 /// http://localhost:11434). Calls `on_update` with the accumulated translation as tokens
 /// arrive, checking `stop_flag` between chunks so a mid-request Stop feels instant.
@@ -553,6 +669,7 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
     let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
 
     let result = recognizer::run(
+        recognizer::Backend::Vosk,
         vosk_path.to_str().unwrap_or(""),
         rx,
         move |result| {
@@ -607,6 +724,7 @@ fn run_translated_pipeline(
     model_path: std::path::PathBuf,
     source_lang: &'static str,
     use_local: bool,
+    backend: recognizer::Backend,
 ) {
     let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
 
@@ -814,6 +932,7 @@ fn run_translated_pipeline(
     // Monotonic boundary counter. The in-progress live line is always `boundary_id + 1`.
     let mut boundary_id: u64 = 0;
     let result = recognizer::run(
+        backend,
         model_path.to_str().unwrap_or(""),
         rx,
         move |ev| {
@@ -904,7 +1023,16 @@ fn run_vosk_es_pipeline(
         let _ = app_handle.emit("status", StatusEvent { state: "ct2_es_model_missing".into() });
         return;
     }
-    run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, es_path, "es", use_local);
+    run_translated_pipeline(
+        app_handle,
+        stop_flag,
+        ollama_key,
+        ollama_model,
+        es_path,
+        "es",
+        use_local,
+        recognizer::Backend::Vosk,
+    );
 }
 
 fn run_vosk_ja_pipeline(
@@ -914,16 +1042,28 @@ fn run_vosk_ja_pipeline(
     ollama_model: Option<String>,
     use_local: bool,
 ) {
-    let ja_path = vosk_ja_model_path();
+    // Japanese recognises with Whisper, not Vosk. Vosk remains the recognizer for Spanish
+    // and English, where it performs acceptably and its sub-second streaming is worth more
+    // than the accuracy difference.
+    let ja_path = whisper_ja_model_path();
     if !ja_path.exists() {
-        let _ = app_handle.emit("status", StatusEvent { state: "vosk_ja_model_missing".into() });
+        let _ = app_handle.emit("status", StatusEvent { state: "whisper_ja_model_missing".into() });
         return;
     }
     if use_local && !marian::is_model_downloaded("ja") {
         let _ = app_handle.emit("status", StatusEvent { state: "ct2_ja_model_missing".into() });
         return;
     }
-    run_translated_pipeline(app_handle, stop_flag, ollama_key, ollama_model, ja_path, "ja", use_local);
+    run_translated_pipeline(
+        app_handle,
+        stop_flag,
+        ollama_key,
+        ollama_model,
+        ja_path,
+        "ja",
+        use_local,
+        recognizer::Backend::Whisper("ja"),
+    );
 }
 
 #[tauri::command]
@@ -1066,7 +1206,9 @@ pub fn run() {
             pull_model,
             download_vosk_model,
             download_ct2_model,
+            download_whisper_model,
             local_model_exists,
+            whisper_model_exists,
             open_audio_privacy_settings,
         ])
         .run(tauri::generate_context!())

@@ -35,6 +35,7 @@ dirs = "5"
 ureq = "2"
 zip = "2"
 ct2rs = "0.9"
+whisper-rs = { version = "0.16.0", features = ["metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.23"

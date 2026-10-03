@@ -1,0 +1,56 @@
+//! Speech recognition backends.
+//!
+//! Both backends present the same contract — a stream of `RecognitionResult` driven by
+//! 16 kHz mono `i16` blocks — so everything downstream (`crate::chunker`, the translator
+//! threads, the frontend's event handling) is identical whichever one is running. That is
+//! what let Japanese move from Vosk to Whisper without touching the pipeline.
+//!
+//! They are not equivalent, though, and the difference is the interesting part:
+//!
+//! * **Vosk** is natively streaming. It emits a growing partial as audio arrives and a
+//!   `Final` when it hears a pause. Cheap, and sub-second to first text.
+//! * **Whisper** is not. It transcribes a *window* of finished audio, so `whisper.rs`
+//!   synthesises the streaming contract by re-transcribing a sliding window every couple of
+//!   seconds. More accurate by a wide margin (on multi-speaker audio, nearly 3x the BLEU
+//!   end-to-end — see `docs/ja-diagnosis.md`), at the cost of a couple of seconds before
+//!   anything appears at all.
+
+pub mod vosk;
+pub mod whisper;
+
+pub enum RecognitionResult {
+    /// Words being spoken right now (unstable, updates rapidly)
+    Partial(String),
+    /// Completed utterance (stable, ready to display)
+    Final(String),
+    /// Silence or noise
+    Silent,
+}
+
+/// Which engine to recognise with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Backend {
+    Vosk,
+    /// Whisper, with the language it should decode as (`"ja"`). Whisper will happily
+    /// auto-detect, but on short windows of a conversation it guesses wrong often enough to
+    /// matter, and every window is short here.
+    Whisper(&'static str),
+}
+
+/// Runs the chosen backend over `rx`, calling `on_result` for every update.
+///
+/// `model_path` is a directory for Vosk and a single `ggml-*.bin` file for Whisper.
+pub fn run<F>(
+    backend: Backend,
+    model_path: &str,
+    rx: std::sync::mpsc::Receiver<Vec<i16>>,
+    on_result: F,
+) -> Result<(), String>
+where
+    F: FnMut(RecognitionResult),
+{
+    match backend {
+        Backend::Vosk => vosk::run(model_path, rx, on_result),
+        Backend::Whisper(lang) => whisper::run(model_path, lang, rx, on_result),
+    }
+}

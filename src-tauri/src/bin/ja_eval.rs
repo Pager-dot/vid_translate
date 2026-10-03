@@ -24,7 +24,7 @@ use std::time::Instant;
 use vid_translate_lib::chunker::japanese::{Guards, JapaneseChunker};
 use vid_translate_lib::chunker::{self, Chunk, ChunkStrategy, FinalOnlyChunker};
 use vid_translate_lib::marian::{self, MarianState};
-use vid_translate_lib::recognizer::{self, RecognitionResult};
+use vid_translate_lib::recognizer::{self, Backend, RecognitionResult};
 
 /// 250ms at 16 kHz — the chunk size the live audio path uses, so the recognizer produces
 /// the same number of partials per second as it does in the app.
@@ -77,6 +77,28 @@ fn read_wav_16k_mono(path: &Path) -> Result<Vec<i16>, String> {
         pos = body + size + (size & 1);
     }
     Err(format!("{}: no data chunk", path.display()))
+}
+
+/// Which recognizer to decode with. Japanese ships on Whisper now, so that is the default
+/// here too — `VID_TRANSLATE_EVAL_RECOGNIZER=vosk` keeps the old one reachable for
+/// comparison, which is the whole reason the backends share an interface.
+fn pick_backend() -> (Backend, std::path::PathBuf) {
+    let vosk = dirs::data_local_dir()
+        .unwrap_or_else(|| ".".into())
+        .join("vid_translate")
+        .join("vosk-model-ja");
+    if std::env::var("VID_TRANSLATE_EVAL_RECOGNIZER").as_deref() == Ok("vosk") {
+        return (Backend::Vosk, vosk);
+    }
+    let whisper = std::env::var_os("VID_TRANSLATE_WHISPER_MODEL")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| ".".into())
+                .join("vid_translate")
+                .join("ggml-small.bin")
+        });
+    (Backend::Whisper("ja"), whisper)
 }
 
 /// The plan asks for the pre-change baseline to be recorded before the clause chunker is
@@ -158,7 +180,8 @@ mod realtime {
 
     pub fn run(
         samples: Vec<i16>,
-        vosk_model: &str,
+        backend: super::Backend,
+        model_path: &str,
         state: &MarianState,
         chunker: &mut dyn ChunkStrategy,
     ) -> Result<Latencies, String> {
@@ -253,7 +276,7 @@ mod realtime {
                 // calls the recognizer has heard n * 250ms of audio. Derived from the call
                 // count rather than the feeder's atomic, which races with it.
                 let mut blocks = 0u64;
-                recognizer::run(vosk_model, rx_audio, |ev| {
+                recognizer::run(backend, model_path, rx_audio, |ev| {
                     blocks += 1;
                     // Everything in this block had finished being spoken by here.
                     let pos = blocks * 250;
@@ -358,7 +381,12 @@ fn run_text_clip(path: &Path, state: &MarianState) -> Result<ClipResult, String>
     })
 }
 
-fn run_clip(path: &Path, model_path: &str, state: &MarianState) -> Result<ClipResult, String> {
+fn run_clip(
+    path: &Path,
+    backend: Backend,
+    model_path: &str,
+    state: &MarianState,
+) -> Result<ClipResult, String> {
     let samples = read_wav_16k_mono(path)?;
     let stop_flag = AtomicBool::new(false);
     let started = Instant::now();
@@ -376,7 +404,7 @@ fn run_clip(path: &Path, model_path: &str, state: &MarianState) -> Result<ClipRe
     // When each chunk was cut. Kept for ordering only: see the note on `latencies_ms`.
     let mut cut_at: Vec<Instant> = Vec::new();
 
-    recognizer::run(model_path, rx, |ev| match ev {
+    recognizer::run(backend, model_path, rx, |ev| match ev {
         RecognitionResult::Partial(text) => {
             for c in chunker.push_partial(&text) {
                 chunks.push(c);
@@ -452,18 +480,17 @@ fn main() {
     let all_text = args
         .iter()
         .all(|a| Path::new(a).extension().and_then(|e| e.to_str()) == Some("txt"));
-    let vosk_model = dirs::data_local_dir()
-        .unwrap_or_else(|| ".".into())
-        .join("vid_translate")
-        .join("vosk-model-ja");
-    if !all_text && !vosk_model.exists() {
+    let (backend, model) = pick_backend();
+    if !all_text && !model.exists() {
         eprintln!(
-            "no JA Vosk model at {} — start the app once in JA mode to download it",
-            vosk_model.display()
+            "no {backend:?} model at {} — start the app once in JA mode to download it, or \
+             point VID_TRANSLATE_WHISPER_MODEL at a ggml file",
+            model.display()
         );
         std::process::exit(1);
     }
-    let vosk_model = vosk_model.to_string_lossy().to_string();
+    eprintln!("[ja_eval] recognizer: {backend:?}");
+    let model = model.to_string_lossy().to_string();
 
     // One MarianState for the whole run so the model is loaded from disk once.
     let state = MarianState::default();
@@ -476,7 +503,7 @@ fn main() {
         if realtime {
             match read_wav_16k_mono(path).and_then(|samples| {
                 let mut chunker = pick_chunker();
-                realtime::run(samples, &vosk_model, &state, chunker.as_mut())
+                realtime::run(samples, backend, &model, &state, chunker.as_mut())
             }) {
                 Ok(l) => {
                     eprintln!("[ja_eval] real-time latency for {}:", path.display());
@@ -492,7 +519,7 @@ fn main() {
         let outcome = if path.extension().and_then(|e| e.to_str()) == Some("txt") {
             run_text_clip(path, &state)
         } else {
-            run_clip(path, &vosk_model, &state)
+            run_clip(path, backend, &model, &state)
         };
         match outcome {
             Ok(r) => {

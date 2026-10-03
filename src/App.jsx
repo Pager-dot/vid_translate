@@ -18,6 +18,7 @@ const SETUP_SCREEN_H = 190;
 const SETUP_STATUSES = [
   "model_missing",
   "vosk_ja_model_missing",
+  "whisper_ja_model_missing",
   "vosk_es_model_missing",
   "ct2_ja_model_missing",
   "ct2_es_model_missing",
@@ -319,6 +320,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen]   = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(null); // { kind, status, downloaded, total, error }
   const [ct2DownloadProgress, setCt2DownloadProgress] = useState(null); // same shape, local translation models
+  const [whisperDownloadProgress, setWhisperDownloadProgress] = useState(null); // same shape, JA Whisper model
 
   const [settings, setSettings] = useState(loadSettings);
   const [draft, setDraft]       = useState(settings);
@@ -580,7 +582,23 @@ export default function App() {
         }
       });
 
-      unlistenRefs.current = [unlistenTx, unlistenStatus, unlistenDownload, unlistenCt2Download];
+      const unlistenWhisperDownload = await listen("whisper_download_progress", (event) => {
+        setWhisperDownloadProgress(event.payload);
+        if (event.payload.status === "done") {
+          setTimeout(() => {
+            setWhisperDownloadProgress(null);
+            toggleRef.current();
+          }, 400);
+        }
+      });
+
+      unlistenRefs.current = [
+        unlistenTx,
+        unlistenStatus,
+        unlistenDownload,
+        unlistenCt2Download,
+        unlistenWhisperDownload,
+      ];
     };
 
     setupListeners();
@@ -756,6 +774,9 @@ export default function App() {
   const MISSING_MODEL_KIND = {
     model_missing: { kind: "en", label: "English speech", type: "vosk" },
     vosk_ja_model_missing: { kind: "ja", label: "Japanese speech", type: "vosk" },
+    // Japanese recognises with Whisper now. One 487MB file, so the download is noticeably
+    // longer than the others and the progress bar earns its keep.
+    whisper_ja_model_missing: { kind: "whisper-ja", label: "Japanese speech", type: "whisper" },
     vosk_es_model_missing: { kind: "es", label: "Spanish speech", type: "vosk" },
     ct2_ja_model_missing: { kind: "ja", label: "Japanese local translation", type: "ct2" },
     ct2_es_model_missing: { kind: "es", label: "Spanish local translation", type: "ct2" },
@@ -763,12 +784,15 @@ export default function App() {
 
   if (MISSING_MODEL_KIND[status]) {
     const { kind, label, type } = MISSING_MODEL_KIND[status];
-    const progressState = type === "ct2" ? ct2DownloadProgress : downloadProgress;
+    const progressState =
+      type === "ct2" ? ct2DownloadProgress : type === "whisper" ? whisperDownloadProgress : downloadProgress;
     const dl = progressState && progressState.kind === kind ? progressState : null;
     const pct = dl && dl.total ? Math.round((dl.downloaded / dl.total) * 100) : null;
     const startDownload = () =>
       type === "ct2"
         ? invoke("download_ct2_model", { lang: kind })
+        : type === "whisper"
+        ? invoke("download_whisper_model")
         : invoke("download_vosk_model", { kind });
 
     return (
