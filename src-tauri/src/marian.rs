@@ -34,7 +34,26 @@ pub struct MarianState {
 /// (fugumt-ja-en beat Helsinki-NLP/opus-mt-ja-en head-to-head on real fragments — clearly
 /// better on some, e.g. greetings, worse on a few, net improvement. For Spanish, swap `ja`
 /// for `es` / the model for `Helsinki-NLP/opus-mt-es-en`), then uploaded to CT2_MODEL_REPO.
+/// Phase 4 (quantization A/B): `VID_TRANSLATE_JA_MODEL_DIR` / `VID_TRANSLATE_ES_MODEL_DIR`
+/// override the load path, so an alternative build can be compared against the shipped
+/// int8 one without touching the download story. int8 degrades lower-resource pairs more
+/// than high-resource ones, and ja-en is the weaker of our two, so the comparison worth
+/// running is an fp32 build:
+///
+///   ct2-transformers-converter --model staka/fugumt-ja-en --output_dir ct2-model-ja-fp32 \
+///       --copy_files source.spm target.spm
+///   VID_TRANSLATE_JA_MODEL_DIR=/abs/path/ct2-model-ja-fp32 npm run tauri dev
+///
+/// Record the verdict in docs/ja-diagnosis.md; do not change the default without it.
+fn model_dir_override(source_lang: &str) -> Option<PathBuf> {
+    let key = format!("VID_TRANSLATE_{}_MODEL_DIR", source_lang.to_uppercase());
+    std::env::var_os(key).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
+}
+
 pub fn model_path(source_lang: &str) -> PathBuf {
+    if let Some(dir) = model_dir_override(source_lang) {
+        return dir;
+    }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("vid_translate")
@@ -51,6 +70,9 @@ pub fn is_model_downloaded(source_lang: &str) -> bool {
 
 fn build_translator(source_lang: &str) -> Result<Ct2Translator, String> {
     let path = model_path(source_lang);
+    if model_dir_override(source_lang).is_some() {
+        eprintln!("[marian] using overridden model dir for '{source_lang}': {}", path.display());
+    }
     if !is_model_downloaded(source_lang) {
         return Err(format!(
             "no local model found at {} — it should have been downloaded before starting; try toggling TEST LOCAL again",
