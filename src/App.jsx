@@ -305,6 +305,10 @@ export default function App() {
   const [isPartial, setIsPartial] = useState(false);
   const [translationHistory, setTranslationHistory] = useState([]);
   const [pendingEnglish, setPendingEnglish]         = useState("");
+  // True while the live English line is a re-translation of an unfinished clause (a
+  // "partial-chunk", or a chunk the backend cut on a length/time guard rather than a real
+  // clause boundary). Rendered dimmed, because it will be replaced as the speaker finishes.
+  const [pendingProvisional, setPendingProvisional] = useState(false);
   const [japaneseStream, setJapaneseStream]         = useState("");
   const historyEndRef = useRef(null);
 
@@ -340,34 +344,13 @@ export default function App() {
       return;
     }
     const next = pendingQueueRef.current.shift();
-    if (next.kind === "final") {
-      // The sentence's paced reveal has finished playing out — now commit the full
-      // translation to history and clear the live lines, then move straight on (no dwell).
-      setTranslationHistory((h) => {
-        if (h.length > 0 && h[h.length - 1] === next.text) return h;
-        return [...h, next.text];
-      });
-      setPendingEnglish("");
-      setJapaneseStream("");
-      showNextPendingChunk();
-      return;
-    }
     setPendingEnglish(next.text);
     pendingTimerRef.current = setTimeout(showNextPendingChunk, PENDING_CHUNK_MS);
   };
 
   const enqueuePendingChunk = (text) => {
+    setPendingProvisional(false);
     pendingQueueRef.current.push({ kind: "chunk", text });
-    if (!pendingTimerRef.current) {
-      showNextPendingChunk();
-    }
-  };
-
-  // JA mode: the backend translates whole sentences at once and streams the English out in
-  // word-chunks. The finalized line must wait its turn behind those chunks instead of
-  // wiping them off screen instantly, so it rides through the same queue.
-  const enqueueFinalLine = (text) => {
-    pendingQueueRef.current.push({ kind: "final", text });
     if (!pendingTimerRef.current) {
       showNextPendingChunk();
     }
@@ -386,6 +369,10 @@ export default function App() {
       container.scrollTop = container.scrollHeight;
     }
   }, [translationHistory]);
+
+  // The boundary id of the live line. A "final-chunk" carrying this id is that same line
+  // finished, so the live line is cleared instead of being left on screen as a duplicate.
+  const liveIdRef = useRef(0);
 
   const modeRef = useRef(mode);
   useEffect(() => { modeRef.current = mode; }, [mode]);
@@ -486,11 +473,19 @@ export default function App() {
   useEffect(() => {
     const setupListeners = async () => {
       const unlistenTx = await listen("transcription", (event) => {
-        const { text, current, type: kind } = event.payload;
+        const { text, current, type: kind, id, provisional } = event.payload;
 
         if (modeRef.current === "vosk-ja" || modeRef.current === "vosk-es") {
           if (kind === "partial") {
             setJapaneseStream(text);
+          } else if (kind === "partial-chunk") {
+            // The in-progress clause, re-translated from its start on every update. This
+            // replaces the live line in place and deliberately does NOT go through the
+            // 500ms paced queue: the whole point is that it self-corrects as the Japanese
+            // predicate lands, and a queue would show every superseded guess in turn.
+            liveIdRef.current = id;
+            setPendingEnglish(text);
+            setPendingProvisional(true);
           } else if (kind === "streaming-en") {
             if (modeRef.current === "vosk-ja" && !useLocalRef.current) {
               // Ollama streams the accumulated translation token-by-token — already a
@@ -501,23 +496,34 @@ export default function App() {
               enqueuePendingChunk(capPendingWords(text));
             }
           } else if (kind === "final-chunk") {
-            // A mid-utterance chunk finished translating (eager chunking keeps latency
-            // low on long sentences). Record it in history but leave the live caption
-            // and paced pending queue running — the utterance isn't actually over yet.
+            // A clause boundary was reached: this chunk is now immutable. Record it in
+            // history and leave the paced queue running — the utterance isn't over yet.
             setTranslationHistory((h) => {
               if (h.length > 0 && h[h.length - 1] === text) return h;
               return [...h, text];
             });
+            // If this is the line the user was watching live, it has been promoted; drop
+            // the provisional copy rather than showing the same words twice.
+            if (id && id === liveIdRef.current) {
+              setPendingEnglish("");
+              setPendingProvisional(false);
+            }
           } else if (kind === "utterance-end") {
             clearPendingQueue();
             setPendingEnglish("");
+            setPendingProvisional(false);
             setJapaneseStream("");
           } else if (modeRef.current === "vosk-ja" && useLocalRef.current) {
-            // Local JA translates whole sentences and reveals them as paced word-chunks —
-            // the finalized line waits behind those chunks so the streaming reveal actually
-            // plays out instead of being wiped instantly. (Ollama JA commits immediately
-            // below, since its token ticker already streamed in real time.)
-            enqueueFinalLine(text);
+            // Local JA: the live line is the re-translated tail (above), not a paced
+            // word-by-word reveal, so a finalized line commits straight to history.
+            clearPendingQueue();
+            setTranslationHistory((h) => {
+              if (h.length > 0 && h[h.length - 1] === text) return h;
+              return [...h, text];
+            });
+            setPendingEnglish("");
+            setPendingProvisional(false);
+            setJapaneseStream("");
           } else {
             clearPendingQueue();
             setTranslationHistory((h) => {
@@ -525,6 +531,7 @@ export default function App() {
               return [...h, text];
             });
             setPendingEnglish("");
+            setPendingProvisional(false);
             setJapaneseStream("");
           }
         } else {
@@ -901,7 +908,7 @@ export default function App() {
                   })}
                   <div ref={historyEndRef} />
                 </div>
-                {showPending && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
+                {showPending && <div className={pendingProvisional ? "ja-pending ja-pending--provisional" : "ja-pending"} data-tauri-drag-region>{pendingEnglish}</div>}
               </>
             )
           ) : translationHistory.length === 0 ? (
@@ -909,7 +916,7 @@ export default function App() {
             // pinning it under an empty history area
             pendingEnglish || japaneseStream ? (
               <>
-                {showPending && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
+                {showPending && <div className={pendingProvisional ? "ja-pending ja-pending--provisional" : "ja-pending"} data-tauri-drag-region>{pendingEnglish}</div>}
                 {japaneseStream && <div className="ja-japanese" data-tauri-drag-region>{japaneseStream}</div>}
               </>
             ) : (
@@ -934,7 +941,7 @@ export default function App() {
                 })}
                 <div ref={historyEndRef} />
               </div>
-              {pendingEnglish && <div className="ja-pending" data-tauri-drag-region>{pendingEnglish}</div>}
+              {pendingEnglish && <div className={pendingProvisional ? "ja-pending ja-pending--provisional" : "ja-pending"} data-tauri-drag-region>{pendingEnglish}</div>}
               {japaneseStream && <div className="ja-japanese" data-tauri-drag-region>{japaneseStream}</div>}
             </>
           )}

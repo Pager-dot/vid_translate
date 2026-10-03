@@ -666,6 +666,12 @@ fn run_translated_pipeline(
             // afterward would otherwise be dropped with zero user-visible feedback.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let on_update = |partial: &str| {
+                    // JA suppresses the paced word-by-word reveal: its live line is the
+                    // re-translated in-progress tail (`partial-chunk`), and feeding the
+                    // paced queue at the same time would make the two fight over one line.
+                    if source_lang == "ja" {
+                        return;
+                    }
                     let _ = app_line
                         .emit("transcription", TranscriptionEvent::new("streaming-en", partial));
                 };
@@ -724,6 +730,75 @@ fn run_translated_pipeline(
         }
     });
 
+    // Phase 3: re-translate the in-progress tail instead of locking in an append-only
+    // guess. The old pipeline committed an English line the moment a chunk was emitted; a
+    // Japanese clause that has not reached its predicate can only be guessed at, so the
+    // guess has to be replaceable. This thread owns that one live line: it re-translates
+    // the whole current tail from its start (not just the new characters) and emits
+    // `partial-chunk { id, text }`, which the frontend renders in place. When the chunker
+    // finds a real boundary the ordinary `final-chunk` arrives with the same id and the
+    // frontend promotes the line to immutable history.
+    //
+    // Only wired for local JA: a ≤60-char tail through CT2 costs tens of milliseconds, so
+    // one translation per 300ms is affordable, whereas against Ollama it would be an HTTP
+    // round trip per partial. If CPU load ever becomes a problem, raise TAIL_DEBOUNCE_MS
+    // before changing anything else.
+    const TAIL_DEBOUNCE_MS: u64 = 300;
+    let tx_tail = if use_local && source_lang == "ja" {
+        let (tx, rx) = std::sync::mpsc::channel::<(u64, String)>();
+        let app_tail = app_handle.clone();
+        let stop_flag_tail = stop_flag.clone();
+        std::thread::spawn(move || {
+            while let Ok(mut latest) = rx.recv() {
+                // Coalesce: while the debounce window is open, keep only the newest tail.
+                // Partials arrive every ~250ms and each supersedes the last, so translating
+                // every one of them would be pure waste.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(TAIL_DEBOUNCE_MS);
+                loop {
+                    let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
+                    else {
+                        break;
+                    };
+                    match rx.recv_timeout(remaining) {
+                        Ok(newer) => latest = newer,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                if stop_flag_tail.load(Ordering::Relaxed) {
+                    return;
+                }
+                let (id, tail) = latest;
+                let marian_state = app_tail.state::<marian::MarianState>();
+                let english = marian::translate_local_blocking(
+                    source_lang,
+                    &tail,
+                    &stop_flag_tail,
+                    &marian_state,
+                    |_| {},
+                );
+                if english.is_empty() || stop_flag_tail.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let _ = app_tail.emit(
+                    "transcription",
+                    TranscriptionEvent {
+                        text: english,
+                        current: String::new(),
+                        kind: "partial-chunk".into(),
+                        id,
+                        // The tail is by definition an unfinished clause.
+                        provisional: true,
+                    },
+                );
+            }
+        });
+        Some(tx)
+    } else {
+        None
+    };
+
     let rx = audio::start_capture(stop_flag.clone());
     spawn_capture_watchdog(app_handle.clone(), stop_flag.clone());
     let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
@@ -755,6 +830,12 @@ fn run_translated_pipeline(
                             id: boundary_id,
                             provisional: !chunk.boundary_confident,
                         });
+                    }
+                    if let Some(tx_tail) = &tx_tail {
+                        let tail = chunker.pending_tail();
+                        if !tail.is_empty() {
+                            let _ = tx_tail.send((boundary_id + 1, tail));
+                        }
                     }
                     let _ = app_for_partial
                         .emit("transcription", TranscriptionEvent::new("partial", text));

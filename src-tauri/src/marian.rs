@@ -144,9 +144,12 @@ pub fn translate_local_blocking(
                 // Phase 0.2: the exact string handed to translate_batch, paired with what
                 // came back — the only way to tell bad ASR from bad MT after the fact.
                 crate::debug::log_mt(source_lang, &despaced, &translated, elapsed.as_millis());
-                // The whole sentence was translated in one call (for quality), but the
-                // English is revealed in small word-chunks so the frontend's paced queue
-                // can stream it like the ES/EN modes do — a display effect only.
+                // The clause was translated in one call (for quality), and the English is
+                // handed back in small word-chunks. ES uses these for its paced reveal;
+                // the JA pipeline now ignores them (its live line is the re-translated
+                // in-progress tail instead), but they stay here so this function's
+                // contract is the same for both languages and the offline eval harness can
+                // observe the reveal.
                 let words: Vec<&str> = translated.split_whitespace().collect();
                 for piece in words.chunks(MAX_CHUNK_WORDS) {
                     on_update(&piece.join(" "));
