@@ -109,6 +109,205 @@ fn pick_chunker() -> Box<dyn ChunkStrategy> {
     }
 }
 
+/// Real-time mode: feed the recognizer at the pace the audio actually plays, run the
+/// chunk and tail translators on their own threads as `run_translated_pipeline` does, and
+/// record when each piece of English would have reached the screen.
+///
+/// This is the only way to get a latency number that means anything. In batch mode the
+/// whole clip is handed over at once, so every chunk is cut within a second or two and
+/// then queues behind a serial translate loop — a "latency" measured there is the backlog
+/// of that burst and nothing a user would ever experience.
+///
+/// Because the feed is paced, audio position and wall clock advance together, so for any
+/// event at wall time W reflecting audio up to position P, the user-visible delay is W - P.
+mod realtime {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use vid_translate_lib::chunker::ChunkStrategy;
+    use vid_translate_lib::marian::{self, MarianState};
+    use vid_translate_lib::recognizer::{self, RecognitionResult};
+
+    use super::{p95, SAMPLES_PER_CHUNK};
+
+    /// Mirrors the app: one translation per 300ms for the in-progress tail.
+    const TAIL_DEBOUNCE_MS: u64 = 300;
+
+    #[derive(Default)]
+    pub struct Latencies {
+        /// Last word of a clause spoken -> its finished English available. What the user
+        /// waits once they have stopped saying the clause.
+        pub confirmed_tail: Vec<u128>,
+        /// First word of a clause spoken -> its finished English available. The whole wait
+        /// for a committed line, which includes however long the clause took to say.
+        pub confirmed_head: Vec<u128>,
+        /// A word spoken -> the live provisional line reflecting it. The number that
+        /// decides whether the app feels responsive.
+        pub live_line: Vec<u128>,
+        /// Same updates, timed from the *oldest* word each one newly covers — the worst
+        /// case any word experiences. The true per-word figure lies between this and
+        /// `live_line`.
+        pub live_line_oldest: Vec<u128>,
+        /// Audio position already reflected on the live line.
+        pub covered_ms: u64,
+        /// Translations that returned nothing or an error. Any non-zero value invalidates
+        /// the latency figures: a translation that never happened looks instantaneous.
+        pub failed: usize,
+    }
+
+    pub fn run(
+        samples: Vec<i16>,
+        vosk_model: &str,
+        state: &MarianState,
+        chunker: &mut dyn ChunkStrategy,
+    ) -> Result<Latencies, String> {
+        let fed_samples = AtomicU64::new(0);
+        let lat = Mutex::new(Latencies::default());
+        // One clock for everything, so "audio position" and "now" are the same scale.
+        let clock = Instant::now();
+
+        // Explicit borrows, so each worker can take ownership of its receiver with `move`
+        // while still sharing the clock, the counter and the latency table.
+        let lat_ref = &lat;
+        let fed_ref = &fed_samples;
+        let clock_ref = &clock;
+
+        std::thread::scope(|scope| -> Result<(), String> {
+            let (tx_audio, rx_audio) = std::sync::mpsc::channel();
+            let (tx_chunk, rx_chunk) = std::sync::mpsc::channel::<(String, u64, u64)>();
+            let (tx_tail, rx_tail) = std::sync::mpsc::channel::<(String, u64)>();
+
+            // Feeder: 250ms of audio every 250ms of wall clock, as live capture does.
+            scope.spawn(move || {
+                for (i, block) in samples.chunks(SAMPLES_PER_CHUNK).enumerate() {
+                    let due = Duration::from_millis((i as u64) * 250);
+                    if let Some(wait) = due.checked_sub(clock_ref.elapsed()) {
+                        std::thread::sleep(wait);
+                    }
+                    if tx_audio.send(block.to_vec()).is_err() {
+                        return;
+                    }
+                    fed_ref.fetch_add(block.len() as u64, Ordering::Relaxed);
+                }
+            });
+
+            // Chunk translator, on its own thread as run_translated_pipeline does.
+            scope.spawn(move || {
+                let stop = AtomicBool::new(false);
+                for (text, head_ms, tail_ms) in rx_chunk {
+                    let en = marian::translate_local_blocking("ja", &text, &stop, state, |_| {});
+                    if en.is_empty() || en.starts_with("[translation error") {
+                        lat_ref.lock().unwrap().failed += 1;
+                        eprintln!("[realtime] chunk translation produced nothing: {en:?}");
+                    }
+                    let now = clock_ref.elapsed().as_millis() as u64;
+                    let mut l = lat_ref.lock().unwrap();
+                    l.confirmed_tail.push(now.saturating_sub(tail_ms) as u128);
+                    l.confirmed_head.push(now.saturating_sub(head_ms) as u128);
+                }
+            });
+
+            // Tail translator: debounced, coalescing to the newest tail, as in the app.
+            scope.spawn(move || {
+                let stop = AtomicBool::new(false);
+                while let Ok(mut latest) = rx_tail.recv() {
+                    let deadline = Instant::now() + Duration::from_millis(TAIL_DEBOUNCE_MS);
+                    loop {
+                        let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                            break;
+                        };
+                        match rx_tail.recv_timeout(rem) {
+                            Ok(newer) => latest = newer,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
+                    let (text, at_ms) = latest;
+                    let en = marian::translate_local_blocking("ja", &text, &stop, state, |_| {});
+                    let now = clock_ref.elapsed().as_millis() as u64;
+                    let mut l = lat_ref.lock().unwrap();
+                    if en.is_empty() || en.starts_with("[translation error") {
+                        l.failed += 1;
+                    }
+                    // This update covers the speech between the previous update and `at_ms`.
+                    // The newest word in it waited `now - at_ms`; the oldest waited
+                    // `now - covered`. Reporting only the former — which is what the first
+                    // version of this did — flatters the result to roughly the MT time,
+                    // because the debounce keeps replacing the pending tail with a newer
+                    // one and so keeps moving the start of the interval forward.
+                    let covered = l.covered_ms;
+                    l.live_line.push(now.saturating_sub(at_ms) as u128);
+                    l.live_line_oldest.push(now.saturating_sub(covered) as u128);
+                    l.covered_ms = at_ms;
+                }
+            });
+
+            // The recognizer runs on this thread. Its closure borrows the senders, so it
+            // lives in an inner scope and the senders are dropped after it — which is what
+            // ends the two translator threads.
+            {
+                // Audio position at which the current chunk's first character was spoken.
+                let mut head_ms = 0u64;
+                // recognizer::run invokes this closure once per fed block, so after n
+                // calls the recognizer has heard n * 250ms of audio. Derived from the call
+                // count rather than the feeder's atomic, which races with it.
+                let mut blocks = 0u64;
+                recognizer::run(vosk_model, rx_audio, |ev| {
+                    blocks += 1;
+                    // Everything in this block had finished being spoken by here.
+                    let pos = blocks * 250;
+                    match ev {
+                        RecognitionResult::Partial(text) => {
+                            for c in chunker.push_partial(&text) {
+                                let _ = tx_chunk.send((c.text, head_ms, pos));
+                                head_ms = pos;
+                            }
+                            let tail = chunker.pending_tail();
+                            if !tail.is_empty() {
+                                let _ = tx_tail.send((tail, pos));
+                            }
+                        }
+                        RecognitionResult::Final(text) => {
+                            for c in chunker.flush(&text) {
+                                let _ = tx_chunk.send((c.text, head_ms, pos));
+                                head_ms = pos;
+                            }
+                        }
+                        RecognitionResult::Silent => {}
+                    }
+                })?;
+            }
+            Ok(())
+        })?;
+
+        Ok(lat.into_inner().unwrap())
+    }
+
+    pub fn report(l: &Latencies) {
+        if l.failed > 0 {
+            eprintln!("  !! {} translation(s) produced nothing — latencies below are invalid", l.failed);
+        }
+        for (name, v) in [
+            ("live line, newest word in the update (best case)", &l.live_line),
+            ("live line, oldest word in the update (worst case)", &l.live_line_oldest),
+            ("confirmed line, from last word of clause", &l.confirmed_tail),
+            ("confirmed line, from first word of clause", &l.confirmed_head),
+        ] {
+            if v.is_empty() {
+                continue;
+            }
+            let mean = v.iter().sum::<u128>() / v.len() as u128;
+            eprintln!(
+                "  {name:48}  n={:4}  mean {:>6}ms  p95 {:>6}ms",
+                v.len(),
+                mean,
+                p95(v.clone())
+            );
+        }
+    }
+}
+
 struct ClipResult {
     chunks: Vec<Chunk>,
     /// English for each chunk, index-aligned with `chunks`.
@@ -243,9 +442,13 @@ fn main() {
         eprintln!("  one ASR final per line — for comparing recognizers on equal terms");
         eprintln!("  VID_TRANSLATE_JA_MODEL_DIR overrides the MT model directory (Phase 4 A/B)");
         eprintln!("  VID_TRANSLATE_EVAL_CHUNKER=final-only reproduces the pre-chunker baseline");
+        eprintln!("  VID_TRANSLATE_EVAL_REALTIME=1 paces the audio and reports real latency");
         std::process::exit(2);
     }
 
+    // Real-time mode plays the clip at its true pace, so a 36-minute clip takes 36 minutes.
+    // It is the only mode whose latency numbers mean anything; see `mod realtime`.
+    let realtime = std::env::var("VID_TRANSLATE_EVAL_REALTIME").is_ok_and(|v| v == "1");
     let all_text = args
         .iter()
         .all(|a| Path::new(a).extension().and_then(|e| e.to_str()) == Some("txt"));
@@ -270,6 +473,22 @@ fn main() {
     for arg in &args {
         let path = Path::new(arg);
         eprintln!("[ja_eval] {}", path.display());
+        if realtime {
+            match read_wav_16k_mono(path).and_then(|samples| {
+                let mut chunker = pick_chunker();
+                realtime::run(samples, &vosk_model, &state, chunker.as_mut())
+            }) {
+                Ok(l) => {
+                    eprintln!("[ja_eval] real-time latency for {}:", path.display());
+                    realtime::report(&l);
+                }
+                Err(e) => {
+                    failures += 1;
+                    eprintln!("[ja_eval] FAILED {e}");
+                }
+            }
+            continue;
+        }
         let outcome = if path.extension().and_then(|e| e.to_str()) == Some("txt") {
             run_text_clip(path, &state)
         } else {
