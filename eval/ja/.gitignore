@@ -1,0 +1,4 @@
+# The corpus is local audio, not repo content — see README.md.
+*.wav
+*.txt
+!README.md
