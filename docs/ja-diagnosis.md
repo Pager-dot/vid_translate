@@ -225,14 +225,27 @@ window:
 every 2s, segments committed once enough audio follows them). That approximation is not
 free, but it is close:
 
-| vlog | chunks | BLEU | chrF |
-|---|---|---|---|
-| Vosk, as shipped before | 73 | 18.13 | 53.40 |
-| `whisper-cli`, whole file at once | 118 | 26.35 | 58.57 |
-| **Whisper, in-app streaming** | **147** | **25.06** | **58.20** |
+| | chunks | BLEU | chrF | English words |
+|---|---|---|---|---|
+| **vlog** — 1 speaker, 7.7 min | | | | *(ref 977)* |
+| Vosk, as shipped before | 73 | 18.13 | 53.40 | 824 |
+| `whisper-cli`, whole file at once | 118 | 26.35 | 58.57 | — |
+| **Whisper, in-app streaming** | **147** | **25.06** | **58.20** | — |
+| **family** — multi-speaker, 36 min | | | | *(ref 4244)* |
+| Vosk, as shipped before | 425 | 5.03 | 38.65 | 2768 |
+| `whisper-cli`, whole file at once | 851 | 14.15 | 54.95 | 4301 |
+| **Whisper, in-app streaming** | **911** | **13.21** | **53.06** | **4200** |
 
-+6.9 BLEU over Vosk, and within 1.3 of what batch Whisper gets with the entire file in
-front of it. The gap is the price of not being able to see the future.
+Two things worth reading off this:
+
+* **The streaming approximation costs about 1 BLEU, consistently** — 1.3 on the easy clip,
+  0.9 on the hard one. It does not degrade under load, which was the real risk in
+  synthesising a growing partial out of a model that has no such concept.
+* **The word counts are the clearest evidence of what was wrong before.** Vosk produced
+  2768 English words against a 4244-word reference on the family clip; Whisper produces
+  4200. The third of the speech Vosk was silently dropping is now actually transcribed, and
+  that — not chunk boundaries, not quantization — is what "the translations are wrong"
+  actually was.
 
 ### Latency after the switch
 
