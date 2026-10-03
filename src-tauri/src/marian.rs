@@ -135,10 +135,14 @@ pub fn translate_local_blocking(
             beam_size: 1,
             ..Default::default()
         };
-        return match translator.translate_batch(&[despaced], &options, None) {
+        return match translator.translate_batch(&[despaced.clone()], &options, None) {
             Ok(mut out) => {
                 let (translated, _score) = out.pop().unwrap_or_default();
-                eprintln!("[marian] sentence translated in {:.1?}: {translated:?}", start.elapsed());
+                let elapsed = start.elapsed();
+                eprintln!("[marian] sentence translated in {elapsed:.1?}: {translated:?}");
+                // Phase 0.2: the exact string handed to translate_batch, paired with what
+                // came back — the only way to tell bad ASR from bad MT after the fact.
+                crate::debug::log_mt(source_lang, &despaced, &translated, elapsed.as_millis());
                 // The whole sentence was translated in one call (for quality), but the
                 // English is revealed in small word-chunks so the frontend's paced queue
                 // can stream it like the ES/EN modes do — a display effect only.
@@ -149,7 +153,14 @@ pub fn translate_local_blocking(
                 translated
             }
             Err(e) => {
-                eprintln!("[marian] translate() error after {:.1?}: {e}", start.elapsed());
+                let elapsed = start.elapsed();
+                eprintln!("[marian] translate() error after {elapsed:.1?}: {e}");
+                crate::debug::log_mt(
+                    source_lang,
+                    &despaced,
+                    &format!("[error] {e}"),
+                    elapsed.as_millis(),
+                );
                 format!("[translation error: {e}]")
             }
         };
@@ -165,13 +176,14 @@ pub fn translate_local_blocking(
         let chunk = chunk_words.join(" ");
         eprintln!("[marian] translating '{source_lang}' chunk ({} words): {chunk:?}", chunk_words.len());
         let start = std::time::Instant::now();
-        let translated = translator.translate_batch(&[chunk], &Default::default(), None);
+        let translated = translator.translate_batch(&[chunk.clone()], &Default::default(), None);
         let elapsed = start.elapsed();
 
         match translated {
             Ok(mut out) => {
                 let (piece, _score) = out.pop().unwrap_or_default();
                 eprintln!("[marian] chunk translated in {elapsed:.1?}: {piece:?}");
+                crate::debug::log_mt(source_lang, &chunk, &piece, elapsed.as_millis());
                 if !piece.is_empty() {
                     // Pass just this chunk's translation, not the running total — the
                     // frontend displays each chunk on its own for a fixed minimum duration

@@ -1,4 +1,5 @@
 mod audio;
+pub mod debug;
 mod marian;
 mod recognizer;
 
