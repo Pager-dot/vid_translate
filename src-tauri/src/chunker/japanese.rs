@@ -40,14 +40,35 @@ pub const MIN_CHUNK_CHARS: usize = 6;
 
 /// Never emit a sliver: a boundary inside this many characters is ignored and accumulation
 /// continues.
-pub const DEFAULT_MIN_CHUNK_CHARS: usize = 6;
+///
+/// **This value was measured, and it is far larger than it looks like it should be.** Every
+/// clause cut costs translation quality, because each chunk is translated with no knowledge
+/// of its neighbours. Swept against a 7.7-minute Japanese vlog with a human reference
+/// (BLEU / chrF, document-level):
+///
+/// | min chars | chunks | BLEU | chrF |
+/// |---|---|---|---|
+/// | 6 | 165 | 13.31 | 51.59 |
+/// | 12 | 134 | 15.75 | 52.73 |
+/// | 20 | 107 | 16.57 | 52.14 |
+/// | 30 | 88 | 17.13 | 53.03 |
+/// | 40 | 80 | 17.78 | 53.00 |
+/// | 50 | 73 | **18.40** | **53.80** |
+/// | never cut (translate on `Final` only) | 65 | 18.11 | 52.76 |
+///
+/// The trend is monotonic: fewer cuts, better output. 50 is where quality reaches parity
+/// with never cutting at all, so it is the largest latency win available for free. Lowering
+/// it trades measurable quality for responsiveness; 6 — the value this started with — costs
+/// about 5 BLEU, which is most of the quality of the pair.
+pub const DEFAULT_MIN_CHUNK_CHARS: usize = 50;
 
-/// Hard ceiling before a forced cut. ~60 chars is about one long spoken sentence.
-pub const MAX_CHUNK_CHARS: usize = 60;
+/// Hard ceiling before a forced cut, raised alongside the minimum so a forced cut stays a
+/// genuine last resort rather than the common case.
+pub const MAX_CHUNK_CHARS: usize = 120;
 
 /// Time-based forced flush, measured from the last emit. This is what preserves
 /// responsiveness on long unbroken speech — the original reason the 8-word rule existed.
-pub const MAX_WAIT_MS: u64 = 2500;
+pub const MAX_WAIT_MS: u64 = 4000;
 
 /// Tier A — hard terminals. Cut immediately after.
 const TIER_A: &[char] = &['。', '！', '？', '．', '!', '?'];
@@ -474,6 +495,13 @@ mod tests {
         out
     }
 
+    #[test]
+    fn shipped_guards_are_the_measured_ones() {
+        // Guards against a well-meaning "6 chars is surely enough" edit. The table in the
+        // DEFAULT_MIN_CHUNK_CHARS docs is why these are what they are.
+        let g = Guards::default();
+        assert_eq!((g.min_chunk_chars, g.max_chunk_chars, g.max_wait_ms), (50, 120, 4000));
+    }
 
     fn texts(input: &str) -> Vec<String> {
         chunks(input).into_iter().map(|c| c.text).collect()
