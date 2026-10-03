@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:macos": "bash scripts/dev-macos.sh",
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri"

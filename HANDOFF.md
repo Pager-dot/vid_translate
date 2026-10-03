@@ -287,6 +287,38 @@ and the partial chunk dropped.
 `SystemTap::new`'s error paths — hence building the struct incrementally and letting `Drop`
 clean up. A leaked aggregate leaves a phantom device behind until reboot.
 
+**`npm run tauri dev` cannot capture system audio — use `npm run dev:macos`.** `tauri dev`
+runs `target/debug/vid_translate` directly; it never builds an `.app`. Three separate things
+then conspire, and each one on its own is enough to make the tap silently deliver nothing:
+
+1. Tauri embeds `src-tauri/Info.plist` into the binary's `__TEXT,__info_plist` section, so
+   the usage strings are present — but it historically carried no `CFBundleIdentifier`, and
+   without one TCC has no app identity to attach a grant to. That key is now in
+   `Info.plist` *specifically* for the dev binary; the bundled app gets the same value from
+   `tauri.conf.json`, so keep the two in step.
+2. The dev binary is **linker-signed**, with a generated identifier like
+   `vid_translate-f1db599df58d133f`. That is what System Settings would show as the app's
+   name, and it changes with the binary.
+3. Re-signing `target/debug/vid_translate` by hand does not stick. Cargo re-copies the
+   binary from `target/debug/deps/vid_translate-<hash>` on every invocation, so the
+   signature is discarded the moment `tauri dev` starts. **The artifact in `deps/` has to be
+   signed too** — that is the copy cargo uplifts.
+
+`scripts/dev-macos.sh` does all of it: builds with `--no-default-features` (matching what
+`tauri dev` itself runs, so cargo does not relink and throw the signature away), signs both
+the `deps/` artifact and the uplifted binary with the real bundle identifier, then starts the
+dev server. Changing `Info.plist` alone does **not** trigger a relink, so force one with
+`touch src-tauri/src/lib.rs` after editing it, or the old plist stays embedded.
+
+For anything where the dev path's divergence matters, test the real artifact instead:
+
+```bash
+npm run tauri build -- --debug --bundles app
+codesign --force --deep --sign - --identifier com.paritosh.vidtranslate \
+  src-tauri/target/debug/bundle/macos/VidTranslate.app
+open src-tauri/target/debug/bundle/macos/VidTranslate.app
+```
+
 **Permission is tied to the code signature.** Release builds are ad-hoc signed, so the cdhash
 changes on every build and the TCC grant evaporates while System Settings still lists the
 stale entry as enabled. Expect to hit the permission screen constantly in development and

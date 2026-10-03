@@ -540,6 +540,36 @@ impl SystemTap {
         Ok(())
     }
 
+    /// Whether anything on the machine is currently playing audio.
+    ///
+    /// This is the discriminator between "permission was denied" and "nothing is playing".
+    /// A denied tap and an idle machine look identical from the buffers alone — both are
+    /// pure zeros — so the silence verdict in `macos.rs` only counts silence that happens
+    /// *while the output device is in use by some process*.
+    pub fn output_is_active(&self) -> bool {
+        unsafe {
+            let Ok((device, _)) = default_output() else {
+                return false;
+            };
+            let addr = AudioObjectPropertyAddress {
+                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain,
+            };
+            let mut running: u32 = 0;
+            let mut size = std::mem::size_of::<u32>() as u32;
+            let st = AudioObjectGetPropertyData(
+                device,
+                &addr,
+                0,
+                std::ptr::null(),
+                &mut size,
+                &mut running as *mut _ as *mut c_void,
+            );
+            st == 0 && running != 0
+        }
+    }
+
     /// The tap's stream format, for building the `Resampler`.
     pub fn format(&self) -> (u32, u16) {
         self.format

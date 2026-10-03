@@ -184,10 +184,14 @@ pub fn start_capture(stop: Arc<AtomicBool>) -> mpsc::Receiver<Vec<i16>> {
     rx
 }
 
-/// How long a tap may deliver nothing but bit-exact silence before we conclude permission
-/// was denied. A parameter rather than a literal so the decision is unit-testable.
+/// How long a tap may stay bit-exact silent *while something is playing* before we conclude
+/// permission was denied. Only silence that coincides with an active output device counts:
+/// a denied tap and an idle machine both deliver pure zeros, so wall-clock silence alone
+/// cannot tell them apart — and a session normally starts with several quiet seconds while
+/// the Vosk model loads.
 const SILENCE_VERDICT_AFTER: Duration = Duration::from_secs(6);
-/// How long a tap may deliver no buffers at all before we conclude the device is dead.
+/// How long the tap may deliver no buffers at all, while something is playing, before we
+/// conclude the capture device is dead.
 const NO_FRAMES_VERDICT_AFTER: Duration = Duration::from_secs(3);
 /// Output-change events arrive several times as a Bluetooth device appears, is selected and
 /// settles, so wait for quiet before rebuilding.
@@ -218,10 +222,17 @@ fn tap_capture_loop(
     // must not allocate per tick.
     let mut scratch = vec![0.0f32; 1 << 14];
 
-    let started = Instant::now();
+    // Silence only counts toward a verdict while the machine is actually playing something
+    // (see `SystemTap::output_is_active`), so this is deliberately not wall-clock elapsed.
+    let mut silent_while_playing = Duration::ZERO;
+    let mut last_tick = Instant::now();
     let mut verdict_reached = false;
     let mut change_seen: Option<Instant> = None;
     let mut rebuild_failures = 0u32;
+    // Querying the output device costs a CoreAudio round trip, so sample it rather than
+    // asking on every 5ms pass of the loop.
+    let mut next_activity_check = Instant::now();
+    let mut output_active = false;
 
     while !stop.load(Ordering::Relaxed) {
         if tap.output_changed() {
@@ -277,7 +288,18 @@ fn tap_capture_loop(
         }
 
         if !verdict_reached {
-            if let Some(fault) = silence_verdict(started.elapsed(), ring.frames(), ring.saw_audio())
+            let now = Instant::now();
+            if now >= next_activity_check {
+                output_active = tap.output_is_active();
+                next_activity_check = now + Duration::from_millis(250);
+            }
+            let dt = now.saturating_duration_since(last_tick);
+            last_tick = now;
+            if output_active && !ring.saw_audio() {
+                silent_while_playing += dt;
+            }
+            if let Some(fault) =
+                silence_verdict(silent_while_playing, ring.frames(), ring.saw_audio())
             {
                 set_fault(fault);
                 verdict_reached = true;
@@ -294,15 +316,23 @@ fn tap_capture_loop(
 /// Decides whether a tap that reports success is actually working.
 ///
 /// Split out and pure so it can be tested without CoreAudio: the live signals are only a
-/// clock, a frame count and "was any sample ever non-zero".
-fn silence_verdict(elapsed: Duration, frames: u64, saw_audio: bool) -> Option<CaptureFault> {
+/// frame count, "was any sample ever non-zero", and how long the tap has been silent *while
+/// the machine was playing something*. That last qualifier is what stops an ordinary quiet
+/// stretch — a session starting while a model loads, a paused video — from being reported as
+/// a permission problem.
+fn silence_verdict(
+    silent_while_playing: Duration,
+    frames: u64,
+    saw_audio: bool,
+) -> Option<CaptureFault> {
     if saw_audio {
         return None;
     }
     if frames == 0 {
-        return (elapsed >= NO_FRAMES_VERDICT_AFTER).then_some(CaptureFault::NoAudioFrames);
+        return (silent_while_playing >= NO_FRAMES_VERDICT_AFTER)
+            .then_some(CaptureFault::NoAudioFrames);
     }
-    (elapsed >= SILENCE_VERDICT_AFTER).then_some(CaptureFault::PermissionDenied)
+    (silent_while_playing >= SILENCE_VERDICT_AFTER).then_some(CaptureFault::PermissionDenied)
 }
 
 /// A new output device only forces a new `Resampler` if it changed the stream's shape.
@@ -369,6 +399,18 @@ mod tests {
             silence_verdict(SILENCE_VERDICT_AFTER, 96_000, false),
             Some(CaptureFault::PermissionDenied)
         );
+    }
+
+    // Regression: the first build of this reported a permission problem whenever a session
+    // ran for 6s without audio, which is the normal case — a Vosk model takes seconds to
+    // load, and nothing is playing meanwhile. Only silence accumulated *while the output
+    // device is in use* counts, so an idle machine never accrues any and never faults,
+    // however long it idles.
+    #[test]
+    fn a_quiet_machine_never_reports_a_permission_problem() {
+        let idle = Duration::ZERO; // nothing playing => nothing accumulates
+        assert_eq!(silence_verdict(idle, 96_000 * 600, false), None);
+        assert_eq!(silence_verdict(idle, 0, false), None);
     }
 
     #[test]

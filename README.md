@@ -169,8 +169,15 @@ No manual steps needed.
 git clone <repo-url>
 cd vid_translate
 npm install
-npm run tauri dev
+npm run tauri dev          # Linux / Windows
+npm run dev:macos          # macOS — see below
 ```
+
+**On macOS use `npm run dev:macos`.** Plain `tauri dev` runs a bare binary rather than an
+`.app`, which macOS cannot grant audio-recording permission to — system audio capture then
+silently produces nothing at all. The script builds, signs the binary with the real bundle
+identifier, and then starts the dev server. macOS asks for permission again after each
+rebuild, because ad-hoc signatures change every time.
 
 - First compile takes **5–15 minutes** (builds the Vosk bindings). Later builds are fast.
 - The frontend hot-reloads; Rust changes trigger a rebuild.
