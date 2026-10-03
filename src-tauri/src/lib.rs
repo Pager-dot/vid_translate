@@ -1,7 +1,8 @@
 mod audio;
+pub mod chunker;
 pub mod debug;
-mod marian;
-mod recognizer;
+pub mod marian;
+pub mod recognizer;
 
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -11,14 +12,29 @@ use std::sync::{
 };
 use tauri::{Emitter, Manager};
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 struct TranscriptionEvent {
     text: String,
     // JA mode only: the word currently being spoken, still in Japanese.
     // Empty in English mode and on final events.
     current: String,
     #[serde(rename = "type")]
-    kind: String, // "partial" | "final"
+    kind: String, // "partial" | "final" | "partial-chunk" | "final-chunk" | ...
+    // Phase 3: identifies the in-progress line a "partial-chunk" belongs to, so the
+    // frontend replaces that line in place instead of appending. Keyed off the chunker's
+    // boundary index, not a text prefix, because Vosk revises JA partials (see
+    // chunker::japanese). The matching "final-chunk" carries the same id, which is the
+    // frontend's cue to promote the line to immutable history. 0 when not applicable.
+    id: u64,
+    // True when the chunk was cut by a length/time guard rather than a real clause
+    // boundary — the frontend dims these to say "this may still change".
+    provisional: bool,
+}
+
+impl TranscriptionEvent {
+    fn new(kind: &str, text: impl Into<String>) -> Self {
+        Self { text: text.into(), kind: kind.into(), ..Default::default() }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -545,8 +561,9 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
                 Partial(text) => {
                     let _ = app_for_result.emit("transcription", TranscriptionEvent {
                         text,
-                        current: String::new(),
-                        kind: "partial".into(),
+    current: String::new(),
+    kind: "partial".into(),
+    ..Default::default()
                     });
                 }
                 Final(text) => {
@@ -554,6 +571,7 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
                         text,
                         current: String::new(),
                         kind: "final".into(),
+                        ..Default::default()
                     });
                 }
                 Silent => {}
@@ -567,47 +585,6 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
     } else {
         let _ = app_handle.emit("status", StatusEvent { state: "idle".into() });
     }
-}
-
-/// Eager fixed-word-count chunking gives low latency but has no regard for grammar, so a
-/// hard cutoff can land mid-phrase (e.g. splitting "vamos a ir a almorzar | a un sitio" right
-/// on a dangling preposition). Given a hard word-count cutoff, this looks a few words
-/// backward for a better place to break — before a connector in ES (prepositions/conjunctions
-/// naturally lead the next clause), or after a particle in JA (particles conclude the clause
-/// they attach to, the opposite direction). Falls back to the hard cutoff if nothing suitable
-/// is found in the lookback window, so this never delays a chunk beyond the original cap.
-fn find_break_point(words: &[&str], start: usize, hard_cutoff: usize, source_lang: &str) -> usize {
-    const LOOKBACK: usize = 3;
-    let window_start = hard_cutoff.saturating_sub(LOOKBACK).max(start + 1);
-
-    match source_lang {
-        "es" => {
-            const CONNECTORS: &[&str] = &[
-                "a", "al", "de", "del", "que", "y", "o", "u", "pero", "porque", "para", "con",
-                "en", "por", "si", "como", "cuando", "aunque", "pues", "sino",
-            ];
-            for i in (window_start..hard_cutoff).rev() {
-                let w = words[i]
-                    .trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase();
-                if CONNECTORS.contains(&w.as_str()) {
-                    return i; // cut before this connector — it leads the next chunk
-                }
-            }
-        }
-        "ja" => {
-            const PARTICLES: &[&str] = &[
-                "が", "けど", "から", "ので", "そして", "でも", "しかし", "し", "たら", "れば",
-            ];
-            for i in (window_start..hard_cutoff).rev() {
-                if PARTICLES.iter().any(|p| words[i].ends_with(p)) {
-                    return i + 1; // cut after this particle — it concludes the clause
-                }
-            }
-        }
-        _ => {}
-    }
-    hard_cutoff
 }
 
 fn is_japanese_text(text: &str) -> bool {
@@ -633,11 +610,24 @@ fn run_translated_pipeline(
 ) {
     let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
 
-    // The bool marks whether `text` is the true tail end of a spoken utterance (a real Vosk
-    // `Final`) vs. just an eagerly-flushed mid-utterance chunk. The frontend needs to tell
-    // these apart: a mid-utterance chunk shouldn't reset the live "currently speaking" caption,
-    // only a real utterance end should.
-    let (tx_text, rx_text) = std::sync::mpsc::channel::<(String, bool)>();
+    // One unit of work for the translator thread.
+    struct TranslateJob {
+        text: String,
+        /// True when this is the true tail end of a spoken utterance (a real Vosk `Final`)
+        /// rather than an eagerly-flushed mid-utterance chunk. The frontend needs to tell
+        /// these apart: a mid-utterance chunk shouldn't reset the live "currently speaking"
+        /// caption, only a real utterance end should.
+        is_utterance_end: bool,
+        /// The chunker's boundary index this chunk closed. The in-progress live line
+        /// carries the *next* index, so the `final-chunk` that lands here promotes exactly
+        /// the line the user was watching. Keyed off the index and not a text prefix
+        /// because Vosk revises JA partials.
+        id: u64,
+        /// The chunk was cut by a length/time guard, not a real clause boundary.
+        provisional: bool,
+    }
+
+    let (tx_text, rx_text) = std::sync::mpsc::channel::<TranslateJob>();
     let app_for_translate = app_handle.clone();
     let stop_flag_worker = stop_flag.clone();
 
@@ -645,25 +635,23 @@ fn run_translated_pipeline(
     // debounce timeouts, etc.) was tried here and reverted: it sits upstream of the
     // use_local branch below, so it silently fed both Ollama and the local model mangled,
     // merged-together input — degrading a JA/Ollama pipeline that worked fine before any of
-    // that was added (see git history at 60432d2). Each `(text, is_utterance_end)` received
-    // here is translated immediately and independently, same as the original design: one
-    // full Vosk `Final` (or, for ES, one eagerly-cut chunk — see the STREAM_CHUNK_WORDS
-    // logic below) in, one translate call out.
+    // that was added (see git history at 60432d2). Each job received here is translated
+    // immediately and independently, same as the original design: one chunk in, one
+    // translate call out. Where the chunk *boundaries* go is `crate::chunker`'s job, and
+    // only its job.
     std::thread::spawn(move || {
-        for (text, is_utterance_end) in rx_text {
+        for job in rx_text {
             if stop_flag_worker.load(Ordering::Relaxed) {
                 break;
             }
+            let TranslateJob { text, is_utterance_end, id, provisional } = job;
             if text.is_empty() {
                 // Nothing left to translate — every word of this utterance was already
                 // eagerly translated chunk-by-chunk. Still signal the end so the frontend
                 // clears the live caption instead of leaving the last chunk stuck on screen.
                 if is_utterance_end {
-                    let _ = app_for_translate.emit("transcription", TranscriptionEvent {
-                        text: String::new(),
-                        current: String::new(),
-                        kind: "utterance-end".into(),
-                    });
+                    let _ = app_for_translate
+                        .emit("transcription", TranscriptionEvent::new("utterance-end", ""));
                 }
                 continue;
             }
@@ -678,11 +666,8 @@ fn run_translated_pipeline(
             // afterward would otherwise be dropped with zero user-visible feedback.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let on_update = |partial: &str| {
-                    let _ = app_line.emit("transcription", TranscriptionEvent {
-                        text: partial.to_string(),
-                        current: String::new(),
-                        kind: "streaming-en".into(),
-                    });
+                    let _ = app_line
+                        .emit("transcription", TranscriptionEvent::new("streaming-en", partial));
                 };
                 let final_text = if use_local {
                     let marian_state = app_line.state::<marian::MarianState>();
@@ -704,11 +689,20 @@ fn run_translated_pipeline(
                     )
                 };
                 if !final_text.is_empty() {
-                    let _ = app_line.emit("transcription", TranscriptionEvent {
-                        text: final_text,
-                        current: String::new(),
-                        kind: if is_utterance_end { "final".into() } else { "final-chunk".into() },
-                    });
+                    let _ = app_line.emit(
+                        "transcription",
+                        TranscriptionEvent {
+                            text: final_text,
+                            current: String::new(),
+                            kind: if is_utterance_end {
+                                "final".into()
+                            } else {
+                                "final-chunk".into()
+                            },
+                            id,
+                            provisional,
+                        },
+                    );
                 }
             }));
 
@@ -719,11 +713,13 @@ fn run_translated_pipeline(
                     .or_else(|| e.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".into());
                 eprintln!("[translate] worker panicked on {text_for_panic_msg:?}: {msg}");
-                let _ = app_for_translate.emit("transcription", TranscriptionEvent {
-                    text: format!("[translation error: internal panic: {msg}]"),
-                    current: String::new(),
-                    kind: "final".into(),
-                });
+                let _ = app_for_translate.emit(
+                    "transcription",
+                    TranscriptionEvent::new(
+                        "final",
+                        format!("[translation error: internal panic: {msg}]"),
+                    ),
+                );
             }
         }
     });
@@ -735,21 +731,13 @@ fn run_translated_pipeline(
     let app_for_partial = app_handle.clone();
     let is_ja = source_lang == "ja";
     // Vosk only fires `Final` once it detects a pause, so a long sentence spoken in one
-    // breath would otherwise sit untranslated until the speaker stops. To keep latency low
-    // we also watch the growing `Partial` text and hand off words to the translator as soon
-    // as STREAM_CHUNK_WORDS new ones accumulate, tracking how many words of the current
-    // utterance have already been sent so `Final` only flushes the leftover remainder.
-    //
-    // This assumes a `Partial` word prefix is stable once we've eagerly sent it — true
-    // enough for ES/EN, but Vosk's own docs call partials explicitly unstable, and Japanese
-    // partials get revised far more often (kanji/word-boundary re-ranking as more audio
-    // arrives). If a prefix gets revised after we've already translated it, `Final` only
-    // sends the leftover remainder assuming the sent prefix still matches — so a correction
-    // never gets re-translated and we silently display stale, sometimes unrelated text. So
-    // JA skips eager partial-chunking entirely and only ever translates the true, stable
-    // `Final` result.
-    const STREAM_CHUNK_WORDS: usize = 8;
-    let mut sent_word_count: usize = 0;
+    // breath would otherwise sit untranslated until the speaker stops. Both languages
+    // therefore watch the growing `Partial` and hand off finished pieces early — but where
+    // a piece *finishes* is language-specific, and the two rules cut in opposite
+    // directions. All of that now lives in `crate::chunker`; see its module docs.
+    let mut chunker = chunker::for_language(source_lang, use_local);
+    // Monotonic boundary counter. The in-progress live line is always `boundary_id + 1`.
+    let mut boundary_id: u64 = 0;
     let result = recognizer::run(
         model_path.to_str().unwrap_or(""),
         rx,
@@ -757,41 +745,53 @@ fn run_translated_pipeline(
             use recognizer::RecognitionResult::*;
             match ev {
                 Partial(text) => {
-                    if !is_ja {
-                        let words: Vec<&str> = text.split_whitespace().collect();
-                        if words.len() >= sent_word_count + STREAM_CHUNK_WORDS {
-                            let hard_cutoff = sent_word_count + STREAM_CHUNK_WORDS;
-                            let cut = find_break_point(&words, sent_word_count, hard_cutoff, source_lang);
-                            let chunk = words[sent_word_count..cut].join(" ");
-                            sent_word_count = cut;
-                            let _ = tx_text.send((chunk, false));
-                        }
+                    debug::log_asr(source_lang, "partial", &text);
+                    for chunk in chunker.push_partial(&text) {
+                        boundary_id += 1;
+                        debug::log_chunk(source_lang, &chunk.text, chunk.boundary_confident);
+                        let _ = tx_text.send(TranslateJob {
+                            text: chunk.text,
+                            is_utterance_end: false,
+                            id: boundary_id,
+                            provisional: !chunk.boundary_confident,
+                        });
                     }
-                    let _ = app_for_partial.emit("transcription", TranscriptionEvent {
-                        text,
-                        current: String::new(),
-                        kind: "partial".into(),
-                    });
+                    let _ = app_for_partial
+                        .emit("transcription", TranscriptionEvent::new("partial", text));
                 }
                 Final(text) if !text.is_empty() => {
-                    let words: Vec<&str> = text.split_whitespace().collect();
-                    let remaining = if words.len() > sent_word_count {
-                        words[sent_word_count..].join(" ")
-                    } else {
-                        String::new()
-                    };
-                    sent_word_count = 0;
-                    if remaining.is_empty() {
+                    debug::log_asr(source_lang, "final", &text);
+                    let chunks = chunker.flush(&text);
+                    for chunk in &chunks {
+                        debug::log_chunk(source_lang, &chunk.text, chunk.boundary_confident);
+                    }
+                    if chunks.is_empty() {
                         // Everything was already sent eagerly — still flag utterance end.
-                        let _ = tx_text.send((String::new(), true));
-                    } else if is_ja && !is_japanese_text(&text) {
-                        let _ = app_for_partial.emit("transcription", TranscriptionEvent {
-                            text: remaining,
-                            current: String::new(),
-                            kind: "final".into(),
+                        let _ = tx_text.send(TranslateJob {
+                            text: String::new(),
+                            is_utterance_end: true,
+                            id: boundary_id,
+                            provisional: false,
                         });
+                    } else if is_ja && !is_japanese_text(&text) {
+                        // JA mode picked up speech that isn't Japanese at all — show the
+                        // recognizer's own text rather than running it through a ja→en model.
+                        let joined: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+                        let _ = app_for_partial.emit(
+                            "transcription",
+                            TranscriptionEvent::new("final", joined.join(" ")),
+                        );
                     } else {
-                        let _ = tx_text.send((remaining, true));
+                        let last = chunks.len() - 1;
+                        for (i, chunk) in chunks.into_iter().enumerate() {
+                            boundary_id += 1;
+                            let _ = tx_text.send(TranslateJob {
+                                text: chunk.text,
+                                is_utterance_end: i == last,
+                                id: boundary_id,
+                                provisional: !chunk.boundary_confident,
+                            });
+                        }
                     }
                 }
                 _ => {}
