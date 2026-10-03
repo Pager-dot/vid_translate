@@ -276,7 +276,7 @@ mod realtime {
                 // calls the recognizer has heard n * 250ms of audio. Derived from the call
                 // count rather than the feeder's atomic, which races with it.
                 let mut blocks = 0u64;
-                recognizer::run(backend, model_path, rx_audio, |ev| {
+                recognizer::run(backend, model_path, rx_audio, || {}, |ev| {
                     blocks += 1;
                     // Everything in this block had finished being spoken by here.
                     let pos = blocks * 250;
@@ -404,7 +404,7 @@ fn run_clip(
     // When each chunk was cut. Kept for ordering only: see the note on `latencies_ms`.
     let mut cut_at: Vec<Instant> = Vec::new();
 
-    recognizer::run(backend, model_path, rx, |ev| match ev {
+    recognizer::run(backend, model_path, rx, || {}, |ev| match ev {
         RecognitionResult::Partial(text) => {
             for c in chunker.push_partial(&text) {
                 chunks.push(c);
@@ -561,6 +561,11 @@ fn main() {
         p95(all_latencies),
         if failures > 0 { format!(", {failures} failed") } else { String::new() },
     );
+    // Before any exit path: the cached model holds Metal resources that ggml's global
+    // destructor insists have been released. Without this the process aborts after doing
+    // all its work correctly.
+    vid_translate_lib::recognizer::whisper::unload_all();
+
     if failures > 0 {
         std::process::exit(1);
     }

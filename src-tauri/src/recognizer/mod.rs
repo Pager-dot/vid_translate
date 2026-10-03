@@ -40,17 +40,24 @@ pub enum Backend {
 /// Runs the chosen backend over `rx`, calling `on_result` for every update.
 ///
 /// `model_path` is a directory for Vosk and a single `ggml-*.bin` file for Whisper.
+///
+/// `on_ready` fires once the model is loaded and the next block of audio will actually be
+/// decoded. The caller needs this to tell the user the truth: loading is the slowest part of
+/// starting a session (487MB for Whisper), it happens inside this call, and audio is already
+/// queueing up behind it. Reporting "listening" before it — which is what the pipeline used
+/// to do — claims the app is working while it is still blocked.
 pub fn run<F>(
     backend: Backend,
     model_path: &str,
     rx: std::sync::mpsc::Receiver<Vec<i16>>,
+    on_ready: impl FnOnce(),
     on_result: F,
 ) -> Result<(), String>
 where
     F: FnMut(RecognitionResult),
 {
     match backend {
-        Backend::Vosk => vosk::run(model_path, rx, on_result),
-        Backend::Whisper(lang) => whisper::run(model_path, lang, rx, on_result),
+        Backend::Vosk => vosk::run(model_path, rx, on_ready, on_result),
+        Backend::Whisper(lang) => whisper::run(model_path, lang, rx, on_ready, on_result),
     }
 }

@@ -24,7 +24,9 @@
 //! to 10.02. With context disabled: 5.3% duplicates. A caption bar that chants one sentence
 //! for four minutes is the failure mode this one line prevents.
 
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -106,20 +108,72 @@ fn remember_tail(tail: &mut String, emitted: &str) {
     }
 }
 
+/// Loaded models, kept for the life of the process and keyed by path.
+///
+/// Without this, every Start/Stop toggle re-read 487MB from disk and re-initialised the GPU
+/// pipeline. `MarianState` already caches the translation models across toggles for exactly
+/// this reason; the recognizer had no equivalent because the Vosk model it replaced was
+/// 48MB and the cost did not show.
+static LOADED: OnceLock<Mutex<HashMap<String, Arc<WhisperContext>>>> = OnceLock::new();
+
+/// Returns the model for `path`, loading it only the first time.
+///
+/// Also callable before a session starts, to get the load out of the way while the user is
+/// still choosing settings — the load is the one part of startup they sit through with
+/// nothing on screen.
+pub fn preload(path: &str) -> Result<Arc<WhisperContext>, String> {
+    let cache = LOADED.get_or_init(|| Mutex::new(HashMap::new()));
+    // Held across the load on purpose: two threads racing to load the same 487MB model
+    // would double the memory and the wait.
+    let mut guard = cache.lock().map_err(|e| format!("whisper cache poisoned: {e}"))?;
+    if let Some(ctx) = guard.get(path) {
+        return Ok(ctx.clone());
+    }
+    let load_start = std::time::Instant::now();
+    let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+        .map_err(|e| format!("failed to load Whisper model at {path}: {e}"))?;
+    eprintln!("[whisper] model loaded in {:.1?}", load_start.elapsed());
+    let ctx = Arc::new(ctx);
+    guard.insert(path.to_string(), ctx.clone());
+    Ok(ctx)
+}
+
+/// Releases every cached model.
+///
+/// **Must be called before the process exits.** Rust statics are never dropped, so without
+/// this the cached contexts still hold Metal resources when ggml's own global destructor
+/// runs, and it aborts:
+///
+/// ```text
+/// ggml-metal-device.m:608: GGML_ASSERT([rsets->data count] == 0) failed
+/// ```
+///
+/// The work is already finished by then, so it presents as a crash on quit — which looks
+/// exactly like the app falling over, and would have shipped that way.
+pub fn unload_all() {
+    if let Some(cache) = LOADED.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+}
+
 pub fn run<F>(
     model_path: &str,
     lang: &'static str,
     rx: Receiver<Vec<i16>>,
+    on_ready: impl FnOnce(),
     mut on_result: F,
 ) -> Result<(), String>
 where
     F: FnMut(RecognitionResult),
 {
-    let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-        .map_err(|e| format!("failed to load Whisper model at {model_path}: {e}"))?;
+    // Free after the first session: see `preload`.
+    let ctx = preload(model_path)?;
     let mut state = ctx
         .create_state()
         .map_err(|e| format!("failed to create Whisper state: {e}"))?;
+    on_ready();
 
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     // Hold a couple of cores back so the translator threads and the UI never starve.
@@ -128,6 +182,11 @@ where
     // The window of audio not yet committed, as the f32 mono Whisper wants.
     let mut window: Vec<f32> = Vec::with_capacity(ms_to_samples(MAX_WINDOW_MS));
     let mut since_pass = 0usize;
+    let mut passes = 0u32;
+    // Pass durations, to check the one invariant that matters: a pass must finish inside
+    // STEP_MS. If it does not, the recognizer falls behind the audio permanently and
+    // latency grows without bound rather than settling.
+    let mut pass_ms_all: Vec<u128> = Vec::new();
     let mut last_partial = String::new();
     // Tail of what has already been emitted as `Final`, for overlap stripping.
     let mut committed_tail = String::new();
@@ -136,7 +195,16 @@ where
         window.extend(chunk.iter().map(|s| *s as f32 / 32768.0));
         since_pass += chunk.len();
 
-        if since_pass < ms_to_samples(STEP_MS) || window.len() < ms_to_samples(MIN_INFER_MS) {
+        // The first pass runs as soon as there is enough audio to decode at all, rather
+        // than after a full step. It costs one extra pass per session and takes roughly a
+        // second off the wait before anything appears — the part of the delay a user
+        // actually notices, because it is the only one they sit through with a blank bar.
+        let step_samples = if passes == 0 {
+            ms_to_samples(MIN_INFER_MS)
+        } else {
+            ms_to_samples(STEP_MS)
+        };
+        if since_pass < step_samples || window.len() < ms_to_samples(MIN_INFER_MS) {
             continue;
         }
         since_pass = 0;
@@ -152,9 +220,22 @@ where
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
 
+        let pass_start = std::time::Instant::now();
         if let Err(e) = state.full(params, &window) {
             eprintln!("[whisper] inference failed: {e}");
             continue;
+        }
+        passes += 1;
+        let pass_ms = pass_start.elapsed().as_millis();
+        pass_ms_all.push(pass_ms);
+        // The first pass pays for GPU pipeline setup on top of inference, so it is reported
+        // separately rather than being averaged into the steady-state figure.
+        if passes <= 2 || pass_ms > 2 * STEP_MS as u128 {
+            eprintln!(
+                "[whisper] pass {passes}: {pass_ms}ms over {:.1}s of audio{}",
+                window.len() as f32 / SAMPLE_RATE as f32,
+                if pass_ms > STEP_MS as u128 { "  (slower than the step — falling behind)" } else { "" }
+            );
         }
 
         let n = state.full_n_segments();
@@ -240,6 +321,20 @@ where
             last_partial = pending.clone();
             on_result(RecognitionResult::Partial(pending));
         }
+    }
+
+    if !pass_ms_all.is_empty() {
+        let mut sorted = pass_ms_all.clone();
+        sorted.sort_unstable();
+        let over = pass_ms_all.iter().filter(|m| **m > STEP_MS as u128).count();
+        eprintln!(
+            "[whisper] {} passes: mean {}ms, p95 {}ms, max {}ms; {over} exceeded the {}ms step",
+            pass_ms_all.len(),
+            pass_ms_all.iter().sum::<u128>() / pass_ms_all.len() as u128,
+            sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)],
+            sorted[sorted.len() - 1],
+            STEP_MS,
+        );
     }
 
     // Capture stopped. Anything still in the window was really said, so flush it.

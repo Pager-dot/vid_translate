@@ -10,6 +10,7 @@ use super::RecognitionResult;
 pub fn run<F>(
     model_path: &str,
     rx: std::sync::mpsc::Receiver<Vec<i16>>,
+    on_ready: impl FnOnce(),
     mut on_result: F,
 ) -> Result<(), String>
 where
@@ -24,6 +25,8 @@ where
     rec.set_max_alternatives(0);
     rec.set_words(false);
     rec.set_partial_words(false);
+
+    on_ready();
 
     for chunk in rx {
         let result = match rec.accept_waveform(&chunk) {

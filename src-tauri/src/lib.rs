@@ -431,6 +431,29 @@ fn whisper_model_exists() -> bool {
     whisper_ja_model_path().exists()
 }
 
+/// Loads the Whisper model into memory ahead of time, off the UI thread.
+///
+/// The frontend fires this when Japanese mode is selected, so the load has already happened
+/// — or is already underway — by the time the user presses Start. It is the one part of
+/// startup they would otherwise sit through with an empty caption bar, and it is wasted
+/// waiting: nothing about it depends on the session having begun.
+///
+/// Safe to call repeatedly; after the first call it returns immediately.
+#[tauri::command]
+fn warm_whisper_model() {
+    std::thread::spawn(|| {
+        let path = whisper_ja_model_path();
+        if !path.exists() {
+            return;
+        }
+        if let Err(e) = recognizer::whisper::preload(&path.to_string_lossy()) {
+            // Not surfaced to the user: this is an optimisation, and if it failed the
+            // session start will fail the same way with a message that has context.
+            eprintln!("[whisper] preload failed: {e}");
+        }
+    });
+}
+
 /// Downloads the Whisper model for Japanese. A single 487MB file, so unlike the Vosk and
 /// CT2 downloads there is no archive to unpack and no file set to iterate — but the size
 /// means the progress events matter more, not less.
@@ -662,16 +685,19 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
         return;
     }
 
-    let _ = app_handle.emit("status", StatusEvent { state: "loading".into() });
+    let _ = app_handle.emit("status", StatusEvent { state: "loading_model".into() });
     let rx = audio::start_capture(stop_flag.clone());
     spawn_capture_watchdog(app_handle.clone(), stop_flag.clone());
     let app_for_result = app_handle.clone();
-    let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
 
+    let app_for_ready = app_handle.clone();
     let result = recognizer::run(
         recognizer::Backend::Vosk,
         vosk_path.to_str().unwrap_or(""),
         rx,
+        move || {
+            let _ = app_for_ready.emit("status", StatusEvent { state: "listening".into() });
+        },
         move |result| {
             use recognizer::RecognitionResult::*;
             match result {
@@ -919,8 +945,12 @@ fn run_translated_pipeline(
 
     let rx = audio::start_capture(stop_flag.clone());
     spawn_capture_watchdog(app_handle.clone(), stop_flag.clone());
-    let _ = app_handle.emit("status", StatusEvent { state: "listening".into() });
+    // Deliberately NOT "listening" yet: the model load happens inside recognizer::run
+    // below, it is the slowest part of starting a session, and audio is already queueing
+    // behind it. Saying "listening" here claimed the app was working while it was blocked.
+    let _ = app_handle.emit("status", StatusEvent { state: "loading_model".into() });
 
+    let app_for_ready = app_handle.clone();
     let app_for_partial = app_handle.clone();
     let is_ja = source_lang == "ja";
     // Vosk only fires `Final` once it detects a pause, so a long sentence spoken in one
@@ -935,6 +965,9 @@ fn run_translated_pipeline(
         backend,
         model_path.to_str().unwrap_or(""),
         rx,
+        move || {
+            let _ = app_for_ready.emit("status", StatusEvent { state: "listening".into() });
+        },
         move |ev| {
             use recognizer::RecognitionResult::*;
             match ev {
@@ -1209,8 +1242,18 @@ pub fn run() {
             download_whisper_model,
             local_model_exists,
             whisper_model_exists,
+            warm_whisper_model,
             open_audio_privacy_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Cached Whisper models hold Metal resources, and ggml's global destructor
+            // asserts that they have all been released by the time it runs. Dropping them
+            // here rather than leaving it to process teardown is what stops a clean quit
+            // from aborting — see recognizer::whisper::unload_all.
+            if matches!(event, tauri::RunEvent::Exit) {
+                recognizer::whisper::unload_all();
+            }
+        });
 }

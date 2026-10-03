@@ -144,7 +144,8 @@ body,
   box-shadow: 0 0 6px #facc15;
 }
 
-.dot--loading {
+.dot--loading,
+.dot--loading_model {
   background: #60a5fa;
   box-shadow: 0 0 6px #60a5fa;
   animation: pulse 1s infinite;
@@ -157,6 +158,23 @@ body,
 .dot--error {
   background: var(--err);
   box-shadow: 0 0 6px var(--err);
+}
+
+/* The empty bar while a model loads or the first window fills. A slow breath reads as
+   "working", where static grey text reads as "stuck" — the wait is the same length either
+   way, which is the point. */
+.placeholder--working {
+  animation: breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
 }
 
 @keyframes pulse {

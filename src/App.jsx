@@ -358,8 +358,25 @@ export default function App() {
     }
   };
 
+  // What an empty caption bar should say. Whisper's model load (487MB) and its first
+  // ~1.3s window both happen before any text exists, so "Listening…" during them is a
+  // small lie that reads as the app being broken. Naming the actual state instead makes
+  // the same wait feel intentional, which is most of the perceived-latency problem.
+  const emptyStateLabel = () => {
+    if (!running) return "Press ▶ to start";
+    if (status === "loading_model" || status === "loading") return "Loading model…";
+    return "Listening…";
+  };
+
   // Apply persisted CSS vars on mount
   useEffect(() => { applySettings(settings); }, []);
+
+  // Load the Whisper model while the user is still looking at the window, rather than
+  // after they press Start. Fire-and-forget and idempotent on the Rust side.
+  useEffect(() => {
+    if (mode !== "vosk-ja") return;
+    invoke("warm_whisper_model").catch(() => {});
+  }, [mode]);
 
   // Auto-scroll JA history. Eager chunking can push new lines in quick succession — a
   // "smooth" scrollIntoView call gets interrupted by the next one before finishing, so it
@@ -912,8 +929,15 @@ export default function App() {
         >
           {liveOnly ? (
             translationHistory.length === 0 && !pendingEnglish ? (
-              <span className="placeholder" data-tauri-drag-region>
-                {running ? "Listening…" : "Press ▶ to start"}
+              <span
+                className={
+                  status === "loading_model" || status === "loading"
+                    ? "placeholder placeholder--working"
+                    : "placeholder"
+                }
+                data-tauri-drag-region
+              >
+                {emptyStateLabel()}
               </span>
             ) : (
               <>
@@ -944,8 +968,15 @@ export default function App() {
                 {japaneseStream && <div className="ja-japanese" data-tauri-drag-region>{japaneseStream}</div>}
               </>
             ) : (
-              <span className="placeholder" data-tauri-drag-region>
-                {running ? "Listening…" : "Press ▶ to start"}
+              <span
+                className={
+                  status === "loading_model" || status === "loading"
+                    ? "placeholder placeholder--working"
+                    : "placeholder"
+                }
+                data-tauri-drag-region
+              >
+                {emptyStateLabel()}
               </span>
             )
           ) : (
