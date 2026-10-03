@@ -5,6 +5,10 @@ license = "Apache-2.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
+# The crate has a second binary (bin/ja_eval.rs, the offline eval harness), which makes a
+# bare `cargo run` ambiguous — and `tauri dev` runs exactly that, so without this the dev
+# server fails to start with "could not determine which binary to run".
+default-run = "vid_translate"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
