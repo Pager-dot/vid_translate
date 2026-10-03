@@ -86,9 +86,10 @@ fn build_translator(source_lang: &str) -> Result<Ct2Translator, String> {
 /// chunk loses full-sentence context — acceptable given the latency this fixes.
 ///
 /// Japanese deliberately skips this: Vosk's JA "words" are morphemes, not words, so an
-/// 8-token chunk is a tiny context-free fragment the model can only mistranslate. JA only
-/// translates on Vosk `Final` (whole stable sentences), so there's no latency problem to
-/// chunk away in the first place.
+/// 8-token chunk is a tiny context-free fragment the model can only mistranslate. What
+/// arrives here for JA is already one clause, cut on a predicate or terminal by
+/// `crate::chunker::japanese`, so there is nothing left to split — splitting it again by
+/// token count would undo exactly the work that module exists to do.
 const MAX_CHUNK_WORDS: usize = 8;
 
 /// Translates one sentence through a local, offline, int8-quantized CTranslate2 model

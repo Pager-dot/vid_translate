@@ -4,13 +4,15 @@
 //! would sit untranslated until the speaker stops. Both languages therefore watch the
 //! growing `Partial` and hand off finished pieces early — but *where* a piece finishes is
 //! language-specific enough that the two rules run in opposite directions. See
-//! `spanish.rs`.
+//! `spanish.rs` and `japanese.rs`.
 //!
 //! This module is a pure function of the partial text: no Tauri, no audio, no model. That
 //! is what makes it unit-testable and what lets `bin/ja_eval.rs` drive it offline.
 
+pub mod japanese;
 pub mod spanish;
 
+pub use japanese::JapaneseChunker;
 pub use spanish::SpanishChunker;
 
 /// One translatable unit.
@@ -57,11 +59,14 @@ pub trait ChunkStrategy: Send {
 
 /// Picks the strategy for a source language.
 ///
-/// Japanese keeps its existing translate-on-`Final`-only behaviour for now, so extracting
-/// the strategy lands as a pure no-op. A clause-boundary strategy for it comes next.
-pub fn for_language(source_lang: &str, _use_local: bool) -> Box<dyn ChunkStrategy> {
-    match source_lang {
-        "ja" => Box::new(FinalOnlyChunker::default()),
+/// `use_local` matters: the Japanese clause chunker only makes sense paired with the
+/// Phase 3 re-translating live line, and re-translating a growing tail every 300ms is only
+/// affordable against the local CT2 model — against Ollama it would be an HTTP call per
+/// partial. Ollama JA therefore keeps the old translate-on-`Final`-only behaviour.
+pub fn for_language(source_lang: &str, use_local: bool) -> Box<dyn ChunkStrategy> {
+    match (source_lang, use_local) {
+        ("ja", true) => Box::new(JapaneseChunker::new()),
+        ("ja", false) => Box::new(FinalOnlyChunker::default()),
         _ => Box::new(SpanishChunker::new()),
     }
 }
