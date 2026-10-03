@@ -93,55 +93,70 @@ the unit tests were written against:
 
 ---
 
-## 4. Next: whisper.cpp evaluation (the only lever that matters now)
+## 4. Whisper: evaluated, and it wins — so this is now an integration problem
 
-ASR is the ceiling, so this is the highest-value work remaining. It is a bigger change than
-everything above combined, and it is a *decision*, not just an implementation.
+Measured, not predicted. `whisper.cpp` v1.9.4, `ggml-small`, `-l ja`, with its Japanese fed
+through the *same* chunker and the *same* int8 model so the recognizer is the only variable:
 
-### 4.1 Measure before committing to anything
+| clip | Vosk → MT | Whisper → MT |
+|---|---|---|
+| vlog — 1 speaker, 7.7 min, quiet | BLEU 18.13 / chrF 53.40 | **26.35 / 58.57** |
+| family — multi-speaker, 36 min, noisy | BLEU 5.03 / chrF 38.65 | **14.15 / 54.95** |
+| CER vs reference Japanese (vlog) | 20.8% | **15.4%** |
 
-Do not swap the recognizer first. Transcribe the same `eval/ja` corpus offline with
-`whisper.cpp -l ja` at a few model sizes and score the Japanese against the reference:
+The multi-speaker clip is the decisive one. Vosk does not merely do worse there, it
+**collapses**: BLEU 5 is not a usable translation, and it emitted 2768 English words against
+a 4244-word reference, silently dropping about a third of the speech. That is why no amount
+of chunker or model work ever moved the needle. Whisper degrades gracefully instead.
 
-```sh
-./whisper-cli -m models/ggml-small.bin -l ja -f clip.wav -otxt
-# then the same CER alignment used in docs/ja-diagnosis.md
-```
+Speed: 36 min of audio in 5:43 wall on Apple Silicon at `small` (~6.3x realtime). Real-time
+feasible here; **unmeasured on Windows and Linux**, which is a shipping blocker, not a
+detail.
 
-Target to beat: **20.8% CER**. Expect `small` or `medium` to roughly halve it; `tiny` may not
-beat Vosk at all. If the win is under ~5 points absolute, stop — it will not justify the
-cost in 4.3.
+> **Keep in consideration — `-mc 0` is mandatory.** Whisper's default context carry-over
+> sends it into repetition loops: on the 36-minute clip, runs of 260 and 258 identical
+> segments, 62% of all segments duplicated, BLEU 10.02. `-mc 0` fixes it (5.3%, BLEU 14.15).
+> Ship without it and the caption bar chants one sentence for four minutes.
 
-### 4.2 The second prize: punctuation
+### 4.1 The design decision to make first
 
-Whisper emits `。`, `、`, `？`. The chunker's Tier A (hard terminals) is currently incidental
-because Vosk's punctuation is unreliable; with Whisper it becomes the primary signal, and
-`fugumt`/`opus-mt` were trained on punctuated text. Two consequences worth planning for:
+Whisper is **not streaming.** It emits finished, punctuated segments; Vosk emits a growing,
+revised partial. The `ChunkStrategy` contract and the Phase 3 self-correcting live line are
+both built on the latter. Pick one, deliberately, before writing code:
 
-- The guard table in section 1 **must be re-swept.** It was measured against unpunctuated,
-  morpheme-spaced Vosk output. Real sentence boundaries may well move the optimum back down,
-  which would make clause chunking a quality win after all — the one way this plan's original
-  hypothesis could still come true.
-- The de-spacing in `chunker::japanese` is a Vosk artefact workaround. With Whisper it
-  becomes a no-op, not a bug, but say so in the module docs rather than deleting it while
-  both recognizers are in play.
+- **Sliding window, synthesised partials.** Keeps the live line and the self-correction.
+  Costs: re-transcribing overlapping audio continuously, and partials that revise far more
+  aggressively than Vosk's — which the `consumed`-never-rewinds rule in `chunker::japanese`
+  already handles, but which would need re-measuring.
+- **Segment-at-a-time.** Much simpler, and whisper's segments are already clean sentences.
+  Costs ~1–2s added latency and **loses the live line you just built**.
 
-### 4.3 What the swap actually costs
+A plausible third option: Whisper for the committed history line, Vosk kept alive purely to
+drive the low-latency live line. Two recognizers running is more CPU, but it is the only
+shape that keeps both the accuracy and the responsiveness.
 
-Be honest about this before starting, because it is where the work is:
+### 4.2 What the clause chunker becomes
 
-- **Not streaming.** Whisper processes windows, not a growing partial. Vosk's `Partial` /
-  `Final` contract is what `ChunkStrategy` and the Phase 3 live line are both built on.
-  Either run Whisper on a sliding window and synthesise partials, or accept ~1–2s of added
-  latency and lose the self-correcting live line. **This is the main design decision, and it
-  should be made before any code is written.**
-- **Model size.** `small` is ~500MB vs Vosk JA's 48MB, against an existing known-bad
-  download/bundling story.
-- **CPU.** Real-time on Apple Silicon at `small`; needs measuring on the Windows/Linux
-  targets before it can ship.
-- Keep Vosk for ES and EN. Only JA has the error rate that justifies this.
+With punctuated input, most of `chunker::japanese` stops being load-bearing:
 
----
+- Tier A (hard terminals) becomes the primary signal instead of incidental.
+- Tiers B–E and the de-spacing exist to compensate for Vosk's unpunctuated,
+  morpheme-spaced output. **Do not delete them while Vosk still serves ES/EN or the live
+  line**, but they should stop being the thing that gets tuned.
+- Sentence-merging Whisper's segments was a wash on quality (BLEU 14.15 → 14.31) but halved
+  the MT calls (851 → 428). Worth doing for cost, not for quality.
+- The guard table in section 1 was measured against Vosk output and **does not transfer.**
+  Notably, Whisper showed none of the strong context-sensitivity Vosk did, because its
+  segments already end at natural pauses rather than mid-clause. Re-sweep before assuming
+  anything.
+
+### 4.3 Model size and packaging
+
+`ggml-small` is 487MB against Vosk JA's 48MB, on top of a download/bundling story that is
+already known-bad. `medium`/`large-v3-turbo` were not tested — `small` already wins
+decisively, so test larger models only if `small` proves inadequate in the app rather than
+on principle. Keep Vosk for ES and EN; only JA has the error rate that justifies any of
+this.
 
 ## 5. Also open
 
@@ -166,8 +181,9 @@ Be honest about this before starting, because it is where the work is:
 
 ## 6. Non-goals, unchanged
 
-- No fine-tuning. Still deferred, and now clearly premature: with 20.8% ASR CER, fine-tuning
-  the translator optimises the wrong stage.
+- No fine-tuning. Still deferred, and now clearly premature: the recognizer is the binding
+  constraint — on multi-speaker audio it loses a third of the speech outright — so fine-tuning
+  the translator optimises the wrong stage. Revisit only after Whisper lands.
 - Do not change ES behaviour. It is byte-identical and fuzz-verified; keep it that way.
 - Do not change the model download/bundling story as part of any of the above (known
   separate issue, which 4.3 will nonetheless collide with).

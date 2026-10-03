@@ -145,6 +145,63 @@ Japanese chunker is built on these and restates them at the top of
 
 ---
 
+## Whisper vs Vosk — measured, and it is not close
+
+Vosk is the ceiling, so `whisper.cpp` (v1.9.4, `ggml-small`, `-l ja`) was run over two clips
+and its Japanese fed through the *same* chunker and the *same* int8 model, so the only
+variable is the recognizer.
+
+### Recognizer accuracy, scored against reference Japanese
+
+| | Vosk JA | Whisper small |
+|---|---|---|
+| character error rate (vlog, single speaker) | 20.8% | **15.4%** |
+
+### End-to-end, scored against reference English
+
+| clip | Vosk → MT | Whisper → MT |
+|---|---|---|
+| vlog — 1 speaker, 7.7 min, quiet | BLEU 18.13 / chrF 53.40 | **BLEU 26.35 / chrF 58.57** |
+| family — multi-speaker, 36 min, kitchen/store noise | BLEU 5.03 / chrF 38.65 | **BLEU 14.15 / chrF 54.95** |
+
+**The hard clip is the finding.** On easy single-speaker audio Vosk is merely worse (+8 BLEU
+for Whisper). On realistic multi-speaker family conversation Vosk *collapses* — BLEU 5 is
+not a usable translation — while Whisper degrades gracefully. Vosk emitted 2768 English
+words against a 4244-word reference: it silently dropped roughly a third of the speech,
+which is why no amount of chunker or model work was ever going to fix this.
+
+The earlier 20.8% CER figure was measured on the easy clip and was therefore flattering.
+
+### `-mc 0` is mandatory
+
+Whisper's default context carry-over sends it into repetition loops. On the 36-minute clip
+it produced runs of 260 and 258 identical segments, 62.2% of all segments being consecutive
+duplicates, dragging BLEU down to 10.02. `-mc 0` (no carried context) cuts that to 5.3% and
+longest-loop 14, and BLEU up to 14.15. **Any integration must disable context carry-over**
+or it will ship a caption bar that chants one sentence for four minutes.
+
+### Sentence merging is a wash on quality, worth it for cost
+
+Whisper's segments follow speech timing, not syntax (avg 12.8 chars). Its punctuation allows
+rejoining them into real sentences before translating — the thing Vosk's unreliable
+punctuation cannot support:
+
+| | chunks | BLEU | chrF |
+|---|---|---|---|
+| segment-per-call | 851 | 14.15 | 54.95 |
+| merged on `。！？` | 428 | 14.31 | 54.54 |
+
+Half the MT calls for the same quality. Notably this does *not* reproduce the large
+context-sensitivity seen with Vosk — Whisper's segments already end at natural pauses, so
+the model is not being handed broken clauses in the first place.
+
+### Speed
+
+36 minutes of audio in 5:43 wall (`small`, Apple Silicon, ~6.3x realtime). Real-time
+feasible with headroom on this machine; still unmeasured on the Windows/Linux targets.
+
+---
+
 ## Phase 4 — quantization A/B
 
 Still open, and now the most promising remaining lever on quality after ASR.
@@ -174,4 +231,4 @@ that is currently broken. Do not change the default without a number here.
 | ES→EN | unchanged, verified by a 2000-case equivalence fuzz against the original algorithm |
 | JA chunking | correct and clause-aligned, tuned to where it costs no quality; a latency win |
 | JA re-translating live line | works — the line visibly self-corrects as a sentence completes |
-| JA quality | **still limited by ASR at 20.8% CER.** Next lever is whisper.cpp `-l ja`, then fp32 |
+| JA quality | **limited by Vosk.** Whisper small nearly triples BLEU on multi-speaker audio; the swap is now an integration problem, not an open question |

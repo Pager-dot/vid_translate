@@ -40,3 +40,25 @@ Record the pre-change baseline **before** merging a chunker change.
 
 Clips and their references are not committed — they are someone's audio, and the corpus is
 expected to be local to whoever is measuring. Only this README and `run.sh` are in git.
+
+## Comparing a different recognizer
+
+`ja_eval` also accepts a `.txt` of Japanese already transcribed by something else, one ASR
+final per line. Everything downstream — chunker, model — is the shipped code, so the score
+difference is the recognizer's:
+
+```sh
+whisper-cli -m ggml-small.bin -l ja -mc 0 -f clip.wav -oj -of out
+python3 -c "import json,sys;print('\n'.join(s['text'].strip() for s in json.load(open('out.json'))['transcription'] if s['text'].strip()))" > out.ja.txt
+cargo run --release --bin ja_eval -- out.ja.txt
+```
+
+`-mc 0` is not optional: Whisper's default context carry-over produces repetition loops
+hundreds of segments long. See docs/ja-diagnosis.md.
+
+## A note on what to measure on
+
+The first corpus clip was a single speaker in a quiet room, and it flattered Vosk badly —
+20.8% CER there versus a near-total collapse on multi-speaker kitchen audio. **Any clip set
+used to make a decision needs noisy, multi-speaker, overlapping-speech material in it**, or
+it will report that whichever recognizer you already have is fine.
