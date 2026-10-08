@@ -78,6 +78,10 @@ fn vosk_ja_model_path() -> std::path::PathBuf {
 /// Apple Silicon, and it is 487MB against the 48MB Vosk model it replaces — which is
 /// already uncomfortable for the download story.
 pub const WHISPER_JA_MODEL_FILE: &str = "ggml-small.bin";
+/// Silero weights for the speech gate. ~865KB, and the thing that stops prominent
+/// background music being captioned as "thank you for watching".
+pub const WHISPER_VAD_MODEL_URL: &str =
+    "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin";
 pub const WHISPER_JA_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
 
@@ -428,7 +432,7 @@ fn local_model_exists(lang: String) -> bool {
 
 #[tauri::command]
 fn whisper_model_exists() -> bool {
-    whisper_ja_model_path().exists()
+    whisper_files().iter().all(|(_, p)| p.exists())
 }
 
 /// Loads the Whisper model into memory ahead of time, off the UI thread.
@@ -454,9 +458,22 @@ fn warm_whisper_model() {
     });
 }
 
-/// Downloads the Whisper model for Japanese. A single 487MB file, so unlike the Vosk and
-/// CT2 downloads there is no archive to unpack and no file set to iterate — but the size
-/// means the progress events matter more, not less.
+/// The files the Japanese recognizer needs: the model itself, and the Silero weights for
+/// the speech gate that stops Whisper captioning background music.
+fn whisper_files() -> Vec<(&'static str, std::path::PathBuf)> {
+    let dir = whisper_ja_model_path()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    vec![
+        (WHISPER_JA_MODEL_URL, whisper_ja_model_path()),
+        (WHISPER_VAD_MODEL_URL, dir.join(recognizer::whisper::VAD_MODEL_FILE)),
+    ]
+}
+
+/// Downloads the Whisper model and the VAD weights. No archives to unpack, but 487MB plus
+/// ~865KB across two files, so the progress events are reported against their combined
+/// total rather than resetting per file.
 #[tauri::command]
 fn download_whisper_model(app: tauri::AppHandle) {
     std::thread::spawn(move || {
@@ -473,70 +490,83 @@ fn download_whisper_model(app: tauri::AppHandle) {
             );
         };
 
-        let dest = whisper_ja_model_path();
-        if dest.exists() {
+        let wanted: Vec<_> = whisper_files().into_iter().filter(|(_, p)| !p.exists()).collect();
+        if wanted.is_empty() {
             emit("done", None, None, None);
             return;
         }
 
         emit("downloading", Some(0), None, None);
-        let resp = match ureq::get(WHISPER_JA_MODEL_URL).call() {
-            Ok(r) => r,
-            Err(e) => {
-                emit("error", None, None, Some(format!("download failed: {e}")));
-                return;
-            }
-        };
-        let total = resp
-            .header("Content-Length")
-            .and_then(|s| s.parse::<u64>().ok());
 
-        if let Some(parent) = dest.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                emit("error", None, None, Some(format!("cannot create model dir: {e}")));
-                return;
+        // Sizes up front, so the bar runs once across both files instead of twice.
+        let mut total: u64 = 0;
+        for (url, _) in &wanted {
+            if let Ok(r) = ureq::head(url).call() {
+                total += r
+                    .header("Content-Length")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
             }
         }
-        // Download to a temporary name and rename on success, so an interrupted download
-        // cannot leave a half-written file that `whisper_model_exists` then reports as
-        // present and the recognizer fails to load mid-session.
-        let tmp = dest.with_extension("bin.part");
-        let mut file = match std::fs::File::create(&tmp) {
-            Ok(f) => f,
-            Err(e) => {
-                emit("error", None, None, Some(format!("cannot create {}: {e}", tmp.display())));
-                return;
-            }
-        };
+        let total = (total > 0).then_some(total);
 
-        let mut reader = resp.into_reader();
-        let mut buf = [0u8; 65536];
         let mut downloaded: u64 = 0;
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if let Err(e) = file.write_all(&buf[..n]) {
-                        emit("error", None, None, Some(format!("write failed: {e}")));
-                        let _ = std::fs::remove_file(&tmp);
-                        return;
-                    }
-                    downloaded += n as u64;
-                    emit("downloading", Some(downloaded), total, None);
-                }
-                Err(e) => {
-                    emit("error", None, None, Some(format!("read failed: {e}")));
-                    let _ = std::fs::remove_file(&tmp);
+        for (url, dest) in &wanted {
+            if let Some(parent) = dest.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    emit("error", None, None, Some(format!("cannot create model dir: {e}")));
                     return;
                 }
             }
-        }
-        drop(file);
 
-        if let Err(e) = std::fs::rename(&tmp, &dest) {
-            emit("error", None, None, Some(format!("could not finalise model file: {e}")));
-            let _ = std::fs::remove_file(&tmp);
-            return;
+            let resp = match ureq::get(url).call() {
+                Ok(r) => r,
+                Err(e) => {
+                    emit("error", None, None, Some(format!("download failed: {e}")));
+                    return;
+                }
+            };
+
+            // Download to a temporary name and rename on success, so an interrupted
+            // download cannot leave a half-written file that `whisper_model_exists` then
+            // reports as present and the recognizer fails to load mid-session.
+            let tmp = dest.with_extension("part");
+            let mut file = match std::fs::File::create(&tmp) {
+                Ok(f) => f,
+                Err(e) => {
+                    emit("error", None, None, Some(format!("cannot create {}: {e}", tmp.display())));
+                    return;
+                }
+            };
+
+            let mut reader = resp.into_reader();
+            let mut buf = [0u8; 65536];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Err(e) = file.write_all(&buf[..n]) {
+                            emit("error", None, None, Some(format!("write failed: {e}")));
+                            let _ = std::fs::remove_file(&tmp);
+                            return;
+                        }
+                        downloaded += n as u64;
+                        emit("downloading", Some(downloaded), total, None);
+                    }
+                    Err(e) => {
+                        emit("error", None, None, Some(format!("read failed: {e}")));
+                        let _ = std::fs::remove_file(&tmp);
+                        return;
+                    }
+                }
+            }
+            drop(file);
+
+            if let Err(e) = std::fs::rename(&tmp, dest) {
+                emit("error", None, None, Some(format!("could not finalise {}: {e}", dest.display())));
+                let _ = std::fs::remove_file(&tmp);
+                return;
+            }
         }
         emit("done", Some(downloaded), total, None);
     });

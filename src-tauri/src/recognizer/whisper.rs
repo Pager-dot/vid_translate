@@ -28,7 +28,10 @@ use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadContext,
+    WhisperVadContextParams, WhisperVadParams,
+};
 
 use super::RecognitionResult;
 
@@ -56,6 +59,66 @@ const TRAIL_SILENCE_MS: i64 = 700;
 const NO_SPEECH_THRESHOLD: f32 = 0.6;
 
 const SAMPLE_RATE: usize = 16_000;
+
+/// The Silero VAD weights, expected next to the main model. ~865KB.
+///
+/// Optional: without it the speech gate below is skipped and Whisper decides for itself
+/// what is speech, which it is bad at.
+pub const VAD_MODEL_FILE: &str = "ggml-silero-v5.1.2.bin";
+
+/// Audio kept when the gate rejects a window, in case speech starts right at its edge and
+/// the VAD missed the onset.
+const VAD_KEEP_TAIL_MS: usize = 500;
+
+/// Phrases Whisper emits over music and silence rather than from anything that was said.
+///
+/// These are artefacts of its training data — it saw an enormous number of videos that end
+/// with someone thanking the viewer over outro music, so music alone is enough to produce
+/// them. Observed in this project: a 36-minute clip whose closing music became
+/// `ご視聴ありがとうございました`, and prominent background music producing "thank you for
+/// watching" out of nothing.
+///
+/// Matched against the whole segment only. A segment that genuinely *is* someone thanking
+/// their viewers is a real caption, and this must not eat it — which is why the test below
+/// requires the phrase to be essentially the entire segment.
+/// Only phrases that are both distinctive to video outros and implausible as spontaneous
+/// speech. Bare "thank you", "thanks", "bye", `ありがとうございました` and `おやすみなさい`
+/// were on this list and were removed: people say all of those for real, and silently
+/// eating someone's goodbye is a worse bug than the one being fixed. The VAD gate is the
+/// primary defence; this is only the net under it.
+const HALLUCINATED_PHRASES: &[&str] = &[
+    "thank you for watching",
+    "thanks for watching",
+    "thank you very much for watching",
+    "thank you for watching this video",
+    "please subscribe",
+    "subscribe to my channel",
+    "like and subscribe",
+    "ご視聴ありがとうございました",
+    "ご視聴ありがとうございます",
+    "チャンネル登録お願いします",
+];
+
+/// Strips what no sane caption needs, for comparison against the phrase list.
+fn canonical(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
+        .filter(|c| !matches!(c, '、' | '。' | '！' | '？' | '・' | '…' | '「' | '」'))
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// True when a segment is one of Whisper's stock phrases and nothing else.
+///
+/// Deliberately exact rather than substring: "thank you for watching, and now the weather"
+/// is a real sentence, and dropping it would be worse than the hallucination this prevents.
+fn is_hallucinated(text: &str) -> bool {
+    let c = canonical(text);
+    if c.is_empty() {
+        return true;
+    }
+    HALLUCINATED_PHRASES.iter().any(|p| canonical(p) == c)
+}
 
 /// How far back to look for text already emitted, when stripping an overlap.
 const MAX_OVERLAP_CHARS: usize = 16;
@@ -180,6 +243,38 @@ where
     // Hold a couple of cores back so the translator threads and the UI never starve.
     let threads = threads.saturating_sub(2).max(2) as i32;
 
+    // Speech gate. Whisper will caption background music rather than admit it heard
+    // nothing — "thank you for watching" over an outro is its single most recognisable
+    // failure, and `no_speech_probability` does not catch it because the model is
+    // *confident*. Silero answers the narrower question of whether this is speech at all,
+    // and a window it rejects never reaches Whisper, which also saves the inference.
+    //
+    // Optional by design: the weights sit beside the main model, and if they are absent the
+    // gate is skipped with a warning rather than failing the session.
+    let mut vad = match std::path::Path::new(model_path).parent().map(|d| d.join(VAD_MODEL_FILE)) {
+        Some(p) if p.exists() => {
+            let mut cp = WhisperVadContextParams::new();
+            cp.set_n_threads(threads);
+            match WhisperVadContext::new(&p.to_string_lossy(), cp) {
+                Ok(v) => {
+                    eprintln!("[whisper] speech gate active ({})", p.display());
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("[whisper] VAD load failed, gate disabled: {e}");
+                    None
+                }
+            }
+        }
+        _ => {
+            eprintln!(
+                "[whisper] no {VAD_MODEL_FILE} beside the model — speech gate disabled, \
+                 expect captions over music"
+            );
+            None
+        }
+    };
+
     // The window of audio not yet committed, as the f32 mono Whisper wants.
     let mut window: Vec<f32> = Vec::with_capacity(ms_to_samples(MAX_WINDOW_MS));
     let mut since_pass = 0usize;
@@ -210,11 +305,50 @@ where
         }
         since_pass = 0;
 
+        // The gate: is any of this speech? If not, discard the window instead of handing
+        // music to Whisper and letting it invent a sentence.
+        if let Some(vad) = vad.as_mut() {
+            let mut vp = WhisperVadParams::new();
+            vp.set_threshold(0.5);
+            vp.set_min_speech_duration(100);
+            vp.set_min_silence_duration(150);
+            let speech = match vad.segments_from_samples(vp, &window) {
+                Ok(segs) => segs.num_segments() > 0,
+                // Fail open: a broken gate should degrade to the old behaviour, not stop
+                // captions entirely.
+                Err(e) => {
+                    eprintln!("[whisper] VAD failed on this window, passing it through: {e}");
+                    true
+                }
+            };
+            if !speech {
+                // Keep a short tail in case speech begins right at the window's edge and
+                // the VAD missed its onset.
+                let keep = ms_to_samples(VAD_KEEP_TAIL_MS).min(window.len());
+                let drop_to = window.len() - keep;
+                window.drain(..drop_to);
+                last_partial.clear();
+                on_result(RecognitionResult::Silent);
+                continue;
+            }
+        }
+
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some(lang));
         params.set_translate(translate);
         // See the module docs: without this, long sessions degenerate into repetition.
         params.set_no_context(true);
+        // Anti-confabulation, all cheap and all aimed at the same failure: Whisper would
+        // rather produce a confident sentence than nothing.
+        //   - suppress_nst: drop non-speech tokens outright.
+        //   - temperature 0 with no increment: disable the fallback sampling that turns a
+        //     low-confidence decode into a creative one.
+        //   - no_speech / logprob thresholds: discard a segment the model itself doubts.
+        params.set_suppress_nst(true);
+        params.set_temperature(0.0);
+        params.set_temperature_inc(0.0);
+        params.set_no_speech_thold(0.6);
+        params.set_logprob_thold(-1.0);
         params.set_n_threads(threads);
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -265,6 +399,11 @@ where
             // the cheapest filter for that, and dropping these is what keeps a quiet room
             // from producing captions.
             if seg.no_speech_probability() > NO_SPEECH_THRESHOLD {
+                continue;
+            }
+            // The net under the speech gate: a stock outro phrase that got through anyway.
+            if is_hallucinated(&text) {
+                eprintln!("[whisper] dropped stock phrase: {text:?}");
                 continue;
             }
             let end_cs = seg.end_timestamp();
@@ -359,7 +498,7 @@ where
                 }
                 if let Ok(t) = seg.to_str_lossy() {
                     let t = t.trim();
-                    if !t.is_empty() {
+                    if !t.is_empty() && !is_hallucinated(t) {
                         if !tail.is_empty() {
                             tail.push(' ');
                         }
@@ -375,4 +514,50 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drops_whispers_stock_outro_phrases() {
+        for s in [
+            "Thank you for watching!",
+            "thank you for watching",
+            "Thanks for watching.",
+            "Please subscribe!",
+            "ご視聴ありがとうございました。",
+            "ご視聴ありがとうございます",
+            "チャンネル登録お願いします！",
+        ] {
+            assert!(is_hallucinated(s), "should have been dropped: {s:?}");
+        }
+    }
+
+    #[test]
+    fn keeps_real_speech_that_merely_resembles_them() {
+        // The failure mode that matters more than the one being fixed: silently eating
+        // something the speaker actually said. Short pleasantries are real speech.
+        for s in [
+            "Thank you.",
+            "Thanks!",
+            "Bye",
+            "ありがとうございました",
+            "おやすみなさい",
+            "Thank you for watching, and now let's look at the menu.",
+            "I want to thank you for watching over my bag.",
+            "Subscribe to a newspaper, she said.",
+            "横浜に来ました",
+        ] {
+            assert!(!is_hallucinated(s), "should have been kept: {s:?}");
+        }
+    }
+
+    #[test]
+    fn empty_and_punctuation_only_segments_are_dropped() {
+        for s in ["", "   ", ".", "。", "、、、", "!?"] {
+            assert!(is_hallucinated(s), "should have been dropped: {s:?}");
+        }
+    }
 }
