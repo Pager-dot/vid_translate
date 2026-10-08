@@ -47,12 +47,24 @@ dirs = "5"
 ureq = "2"
 zip = "2"
 ct2rs = "0.9"
-whisper-rs = { version = "0.16.0", features = ["metal"] }
+# Accelerators are selected per-platform below. Enabling "metal" here unconditionally —
+# which is what `cargo add --features metal` writes — passes -DGGML_METAL=ON to
+# whisper.cpp's CMake on every target, and Linux/Windows then fail looking for Apple's
+# Foundation framework:
+#   CMake Error at ggml/src/ggml-metal/CMakeLists.txt:1 (find_library):
+#     Could not find FOUNDATION_LIBRARY using the following names: Foundation
+whisper-rs = "0.16.0"
+
+# No Metal here, so OpenMP is the only thing keeping whisper.cpp multi-threaded. Without it
+# ggml builds single-threaded and a pass cannot finish inside the 2s step.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+whisper-rs = { version = "0.16.0", features = ["openmp"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.23"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16.0", features = ["metal"] }
 # Microphone capture only. System audio goes through a Core Audio process tap instead (see
 # src/audio/tap.rs), which cpal cannot reach: the tap's aggregate device is private, and
 # cpal's API starts from device enumeration.
