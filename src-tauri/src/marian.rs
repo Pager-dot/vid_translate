@@ -117,6 +117,17 @@ const MAX_CHUNK_WORDS: usize = 8;
 /// Translates one sentence through a local, offline, int8-quantized CTranslate2 model
 /// (dedicated staka/fugumt-ja-en / Helsinki-NLP opus-mt-es-en models — small and fast,
 /// unlike the earlier rust-bert/M2M100 attempt).
+///
+/// TODO(delete the `ja` half): Japanese no longer comes through here. Whisper's native
+/// translate task emits English directly and beat this two-stage path by +6.67 BLEU /
+/// +4.76 chrF on the 36-minute multi-speaker clip, because it works from the audio instead
+/// of from Japanese text — this model could only ever translate what the recognizer wrote
+/// down, and `みなとみらい` written as `港未来` becomes "the future of Yokohama's port" no
+/// matter how good the translator is.
+///
+/// Spanish still needs this. Once the Japanese native path is confirmed in real use, drop
+/// the `ja` branch below, the `ja` slot on `MarianState`, and the ja model download — about
+/// 240MB of weights that no longer earn their place.
 pub fn translate_local_blocking(
     source_lang: &str,
     text: &str,

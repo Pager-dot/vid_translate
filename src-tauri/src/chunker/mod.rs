@@ -1,3 +1,22 @@
+// ============================================================================
+// TODO(delete): this whole module is dead for Japanese.
+//
+// Japanese now uses Whisper's native translate task, which emits English directly — so
+// there is no Japanese text to cut into clauses, and `run_translated_pipeline` bypasses
+// everything here. Measured +6.67 BLEU / +4.76 chrF over transcribe-then-translate on the
+// 36-minute multi-speaker clip.
+//
+// Kept for two reasons only:
+//   1. Spanish still uses `SpanishChunker`, and that behaviour is required to stay
+//      byte-identical. Deleting this module means moving the Spanish path out of it first.
+//   2. VID_TRANSLATE_JA_TWO_STAGE=1 still routes Japanese through here, so the two
+//      approaches can be compared by hand.
+//
+// Once the native-translate path is confirmed in real use: delete `japanese.rs` entirely
+// (along with its ~25 tests and the measured guard table), delete `FinalOnlyChunker`, and
+// fold whatever remains of `SpanishChunker` back into the ES path.
+// ============================================================================
+
 //! Where to cut a growing ASR partial into units worth translating.
 //!
 //! Vosk only fires `Final` once it hears a pause, so a long sentence spoken in one breath

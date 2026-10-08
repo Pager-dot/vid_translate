@@ -161,6 +161,7 @@ pub fn unload_all() {
 pub fn run<F>(
     model_path: &str,
     lang: &'static str,
+    translate: bool,
     rx: Receiver<Vec<i16>>,
     on_ready: impl FnOnce(),
     mut on_result: F,
@@ -211,7 +212,7 @@ where
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some(lang));
-        params.set_translate(false);
+        params.set_translate(translate);
         // See the module docs: without this, long sessions degenerate into repetition.
         params.set_no_context(true);
         params.set_n_threads(threads);
@@ -342,7 +343,7 @@ where
     if window.len() >= ms_to_samples(MIN_INFER_MS) {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some(lang));
-        params.set_translate(false);
+        params.set_translate(translate);
         params.set_no_context(true);
         params.set_n_threads(threads);
         params.set_print_special(false);

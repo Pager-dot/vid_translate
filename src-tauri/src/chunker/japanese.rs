@@ -1,3 +1,17 @@
+// ============================================================================
+// TODO(delete): this file is dead on the shipping Japanese path.
+//
+// It exists to compensate for Vosk's unpunctuated, morpheme-spaced Japanese. Japanese now
+// uses Whisper's native translate task and never produces Japanese text at all, so none of
+// the tier tables, the de-spacing, the overlap rules or the measured guard values below are
+// reached. Reachable only via VID_TRANSLATE_JA_TWO_STAGE=1.
+//
+// Worth saying plainly for whoever deletes it: the guard table in
+// `DEFAULT_MIN_CHUNK_CHARS` was measured, and the three bug fixes here were each found on
+// real audio rather than reasoned out. None of that was wrong — it was just aimed at a
+// stage that the native-translate path removes. Delete it without ceremony.
+// ============================================================================
+
 //! Japanese: cut on clause boundaries, *after* the marker.
 //!
 //! # Phase 0 findings this module is built on

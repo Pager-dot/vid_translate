@@ -31,10 +31,33 @@ pub enum RecognitionResult {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Backend {
     Vosk,
-    /// Whisper, with the language it should decode as (`"ja"`). Whisper will happily
-    /// auto-detect, but on short windows of a conversation it guesses wrong often enough to
-    /// matter, and every window is short here.
-    Whisper(&'static str),
+    Whisper {
+        /// The language to decode as (`"ja"`). Whisper will happily auto-detect, but on
+        /// short windows of a conversation it guesses wrong often enough to matter, and
+        /// every window here is short.
+        lang: &'static str,
+        /// Emit English directly instead of the source language.
+        ///
+        /// Whisper has a native translate task, and on the 36-minute multi-speaker clip it
+        /// beat transcribing-then-translating by **+6.67 BLEU / +4.76 chrF** (19.88 / 57.82
+        /// against 13.21 / 53.06) while deleting a stage and a 240MB model. It wins because
+        /// it heard the *audio*: forcing everything through Japanese text loses meaning in
+        /// the handoff, of which the `みなとみらい` → `港未来` → "the future of Yokohama's
+        /// port" failure was one instance.
+        ///
+        /// The cost is that one pass gives you either the source text or the English, never
+        /// both — so this path has no Japanese caption line, and `crate::chunker` has
+        /// nothing to chunk.
+        translate: bool,
+    },
+}
+
+impl Backend {
+    /// True when the recognizer already emits English, so nothing downstream should
+    /// translate again.
+    pub fn emits_english(&self) -> bool {
+        matches!(self, Backend::Whisper { translate: true, .. })
+    }
 }
 
 /// Runs the chosen backend over `rx`, calling `on_result` for every update.
@@ -58,6 +81,8 @@ where
 {
     match backend {
         Backend::Vosk => vosk::run(model_path, rx, on_ready, on_result),
-        Backend::Whisper(lang) => whisper::run(model_path, lang, rx, on_ready, on_result),
+        Backend::Whisper { lang, translate } => {
+            whisper::run(model_path, lang, translate, rx, on_ready, on_result)
+        }
     }
 }

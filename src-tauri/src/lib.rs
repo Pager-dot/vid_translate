@@ -961,6 +961,9 @@ fn run_translated_pipeline(
     let mut chunker = chunker::for_language(source_lang, use_local);
     // Monotonic boundary counter. The in-progress live line is always `boundary_id + 1`.
     let mut boundary_id: u64 = 0;
+    // Whisper's native translate task hands us English directly, which makes the chunker
+    // and the translation model dead weight for Japanese.
+    let native_en = backend.emits_english();
     let result = recognizer::run(
         backend,
         model_path.to_str().unwrap_or(""),
@@ -970,6 +973,51 @@ fn run_translated_pipeline(
         },
         move |ev| {
             use recognizer::RecognitionResult::*;
+
+            // Native-translate path: the recognizer already produced English, so there is
+            // nothing to chunk and nothing to translate. Text goes straight to the screen.
+            //
+            // Measured +6.67 BLEU / +4.76 chrF over transcribe-then-translate on the
+            // 36-minute multi-speaker clip (19.88 / 57.82 vs 13.21 / 53.06). The whole
+            // chunker and the JA half of `marian` are bypassed here — see the deletion
+            // notes on `crate::chunker`.
+            if native_en {
+                match ev {
+                    Partial(text) if !text.trim().is_empty() => {
+                        debug::log_asr(source_lang, "partial-en", &text);
+                        // The in-progress window, as the live (provisional) line.
+                        let _ = app_for_partial.emit(
+                            "transcription",
+                            TranscriptionEvent {
+                                text,
+                                current: String::new(),
+                                kind: "partial-chunk".into(),
+                                id: boundary_id + 1,
+                                provisional: true,
+                            },
+                        );
+                    }
+                    Final(text) if !text.trim().is_empty() => {
+                        debug::log_asr(source_lang, "final-en", &text);
+                        boundary_id += 1;
+                        // Same id as the live line above, which is the frontend's cue to
+                        // promote that line to history instead of leaving a duplicate.
+                        let _ = app_for_partial.emit(
+                            "transcription",
+                            TranscriptionEvent {
+                                text,
+                                current: String::new(),
+                                kind: "final-chunk".into(),
+                                id: boundary_id,
+                                provisional: false,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
             match ev {
                 Partial(text) => {
                     debug::log_asr(source_lang, "partial", &text);
@@ -1083,7 +1131,17 @@ fn run_vosk_ja_pipeline(
         let _ = app_handle.emit("status", StatusEvent { state: "whisper_ja_model_missing".into() });
         return;
     }
-    if use_local && !marian::is_model_downloaded("ja") {
+    // Whisper's own translate task, rather than transcribing to Japanese and handing that
+    // to the Marian model. Measured +6.67 BLEU / +4.76 chrF on the 36-minute multi-speaker
+    // clip while deleting a stage and a 240MB model — it wins because it heard the audio,
+    // where the two-stage path loses meaning in the handoff through Japanese text.
+    //
+    // VID_TRANSLATE_JA_TWO_STAGE=1 restores the old transcribe-then-translate path, for
+    // comparing the two by hand.
+    let two_stage = std::env::var("VID_TRANSLATE_JA_TWO_STAGE").is_ok_and(|v| v == "1");
+    // Only the two-stage path needs the Japanese translation model. Demanding it on the
+    // native path would block a session on a 240MB download it never reads.
+    if two_stage && use_local && !marian::is_model_downloaded("ja") {
         let _ = app_handle.emit("status", StatusEvent { state: "ct2_ja_model_missing".into() });
         return;
     }
@@ -1095,7 +1153,7 @@ fn run_vosk_ja_pipeline(
         ja_path,
         "ja",
         use_local,
-        recognizer::Backend::Whisper("ja"),
+        recognizer::Backend::Whisper { lang: "ja", translate: !two_stage },
     );
 }
 

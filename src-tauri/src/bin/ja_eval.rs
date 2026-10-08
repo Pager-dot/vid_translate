@@ -98,7 +98,9 @@ fn pick_backend() -> (Backend, std::path::PathBuf) {
                 .join("vid_translate")
                 .join("ggml-small.bin")
         });
-    (Backend::Whisper("ja"), whisper)
+    // Matches the app: native translate unless the two-stage path is asked for.
+    let two_stage = std::env::var("VID_TRANSLATE_JA_TWO_STAGE").is_ok_and(|v| v == "1");
+    (Backend::Whisper { lang: "ja", translate: !two_stage }, whisper)
 }
 
 /// The plan asks for the pre-change baseline to be recorded before the clause chunker is
@@ -403,15 +405,29 @@ fn run_clip(
     let mut chunks: Vec<Chunk> = Vec::new();
     // When each chunk was cut. Kept for ordering only: see the note on `latencies_ms`.
     let mut cut_at: Vec<Instant> = Vec::new();
+    // On the native-translate path the recognizer's output is already English, so the
+    // chunker has nothing to chunk and the translation model must not run — feeding English
+    // to a ja→en model produces nonsense, and the harness would report it as a score.
+    let native_en = backend.emits_english();
 
     recognizer::run(backend, model_path, rx, || {}, |ev| match ev {
         RecognitionResult::Partial(text) => {
+            if native_en {
+                return;
+            }
             for c in chunker.push_partial(&text) {
                 chunks.push(c);
                 cut_at.push(Instant::now());
             }
         }
         RecognitionResult::Final(text) => {
+            if native_en {
+                if !text.trim().is_empty() {
+                    chunks.push(Chunk { text: text.trim().to_string(), boundary_confident: true });
+                    cut_at.push(Instant::now());
+                }
+                return;
+            }
             for c in chunker.flush(&text) {
                 chunks.push(c);
                 cut_at.push(Instant::now());
@@ -434,8 +450,12 @@ fn run_clip(
         // backlog of that burst, not anything a user would experience. End-to-end latency
         // needs the audio paced in real time, which this harness deliberately does not do.
         let t = Instant::now();
-        let english =
-            marian::translate_local_blocking("ja", &chunk.text, &stop_flag, state, |_| {});
+        let english = if native_en {
+            // Already English: the recognizer did the translating.
+            chunk.text.clone()
+        } else {
+            marian::translate_local_blocking("ja", &chunk.text, &stop_flag, state, |_| {})
+        };
         latencies_ms.push(t.elapsed().as_millis());
         english_per_chunk.push(english.clone());
         if !english.is_empty() {
