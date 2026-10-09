@@ -1,27 +1,44 @@
 # vid_translate 🎙️
 
-A transparent, always-on-top, frameless **live caption & translation overlay** for your desktop — built with **Tauri v2 + React**.
+A transparent, always-on-top, frameless **live caption & translation overlay** for your
+desktop — built with **Tauri v2 + React**.
 
-It listens to your **system audio** (whatever is playing — YouTube, a meeting, a movie) and shows YouTube-style live captions at the bottom of your screen:
+It listens to your **system audio** (whatever is playing — YouTube, a meeting, a film) and
+shows live captions at the bottom of your screen:
 
-- **EN** — live English captions (streaming, ~100–200 ms latency) via [Vosk](https://alphacephei.com/vosk/)
-- **JA** — Japanese speech → **English translation** (Vosk recognition + Ollama translation)
-- **ES** — Spanish speech → **English translation** (Vosk recognition + Ollama translation)
+- **EN** — live English captions, streaming, fully offline
+- **JA** — Japanese speech → English, translated directly from the audio
+- **ES** — Spanish speech → English, with the Spanish kept on screen too
 
-The widget is draggable, remembers its position and size, spans the full display width by default, and stays out of your way with a click-through-friendly transparent design.
+The overlay is draggable, remembers its position and size, spans the full display width by
+default, and stays out of your way.
+
+> ### 👀 Looking for the polished one? Try [Mimi](https://github.com/yuxino/Mimi).
+>
+> This project's entire interface is borrowed from **[Mimi](https://github.com/yuxino/Mimi)**
+> by [yuxino](https://github.com/yuxino) — a far more complete, more polished and more
+> capable live speech-translation app, for desktop *and* Android, with many more providers,
+> languages and settings than this one has. If you want the real thing rather than my take
+> on part of it, go there first. The UI you see here is theirs, under the MIT license;
+> see [Credits](#-credits).
 
 ---
 
 ## ✨ Features
 
-- 🪟 Frameless, transparent, always-on-top overlay widget
-- ⚡ Real-time streaming captions (Vosk processes 250 ms chunks in <10 ms)
-- 🌐 Japanese / Spanish → English translation via Ollama (local or ollama.com with an API key)
-- 📥 One-click speech-model download (no manual setup)
-- 🔴 **LIVE** toggle — show only the current spoken sentence, hide the translation history
-- 🖱️ Drag anywhere, resize freely — size & position persist across launches
-- 🎨 Settings panel: font, font scale, opacity, widget width & heights, with a Reset button
-- 🖥️ Cross-platform: Linux (PulseAudio/PipeWire), Windows (WASAPI loopback), macOS (Core Audio process tap — driverless)
+- 🪟 Frameless, transparent, always-on-top overlay
+- ⚡ Streaming English captions — partial words appear as they are spoken
+- 🇯🇵 Japanese → English translated straight from the audio by Whisper, skipping the
+  lossy hop through Japanese text
+- 🇪🇸 Spanish → English with a dedicated `es→en` model, Spanish caption line kept
+- 🌐 Translation via **Ollama** (local or ollama.com), or fully **offline** with bundled
+  CTranslate2 models — no network at all
+- 📥 One-click model downloads with progress; nothing to install by hand
+- 🔴 **LIVE** toggle — show only the line being spoken, hide the history
+- 🖱️ Drag anywhere, resize freely — size and position persist across launches
+- 🎨 Settings console: translation, speech, appearance and layout
+- 🖥️ Linux (PulseAudio/PipeWire), Windows (WASAPI loopback), macOS (Core Audio process
+  tap — driverless)
 
 ---
 
@@ -29,123 +46,163 @@ The widget is draggable, remembers its position and size, spans the full display
 
 ```
 vid_translate/
-├── index.html                      # Single HTML page Tauri loads (mounts #root)
-├── package.json                    # Frontend deps (React 19, Vite 7, @tauri-apps/api) & scripts
-├── vite.config.js                  # Vite dev-server config for Tauri (port 1420)
-├── README.md                       # This file
-├── HANDOFF.md                      # Developer handoff notes / design rationale
-├── public/
-│   └── vite.svg                    # Favicon
-├── src/                            # ── React frontend ──
-│   ├── main.jsx                    # React entry point (mounts <App />)
-│   ├── App.jsx                     # Entire UI: modes, start/stop, LIVE toggle, settings,
-│   │                               #   window sizing/position persistence, backend events
-│   └── App.css                     # All styling: overlay bar, buttons, settings, animations
-├── dist/                           # Vite build output (generated — embedded in release builds)
-└── src-tauri/                      # ── Rust backend ──
-    ├── Cargo.toml                  # Rust deps: tauri 2, vosk, ureq, zip, dirs, serde, tokio,
-    │                               #   wasapi (Windows-only), cpal (macOS-only)
-    ├── Cargo.lock                  # Pinned dependency versions
-    ├── build.rs                    # Per-platform link paths + rpaths for the Vosk library
-    ├── tauri.conf.json             # Window config (frameless, transparent, always-on-top), dev URL
-    ├── tauri.linux.conf.json       # Linux-only overlay: bundles libvosk.so into the package
-    ├── tauri.windows.conf.json     # Windows-only overlay: bundles the DLLs as resources
-    ├── tauri.macos.conf.json       # macOS-only overlay: libvosk.dylib → Contents/Frameworks
-    ├── Info.plist                  # macOS: merged into the bundle (mic usage description)
-    ├── entitlements.plist          # macOS: used only when signing with a real identity
-    ├── capabilities/
-    │   └── default.json            # Tauri v2 permissions (drag, resize, reposition, close…)
-    ├── src/
-    │   ├── main.rs                 # Executable entry point → calls vid_translate_lib::run()
-    │   ├── lib.rs                  # The heart: Tauri commands (start/stop_listening,
-    │   │                           #   download_vosk_model, pull_model), model paths,
-    │   │                           #   EN pipeline, JA/ES translation pipeline (Ollama),
-    │   │                           #   TranscriptionEvent / StatusEvent emission
-    │   ├── recognizer.rs           # Vosk streaming recognizer wrapper (Partial/Final/Silent)
-    │   └── audio/
-    │       ├── mod.rs              # SAMPLE_RATE = 16000, cfg-switch between platforms
-    │       ├── linux.rs            # Linux system-audio capture (parec / PulseAudio)
-    │       ├── windows.rs          # Windows system-audio capture (WASAPI loopback)
-    │       ├── macos.rs            # macOS capture supervisor + resampler (shared by both paths)
-    │       └── tap.rs              # macOS Core Audio process tap (driverless system audio)
-    ├── vendor/
-    │   ├── linux-x86_64/
-    │   │   └── libvosk.so          # Vosk shared library for Linux builds
-    │   └── macos/                  # libvosk.dylib — fetched, not committed (see scripts/)
-    ├── libvosk.dll                 # ┐
-    ├── libvosk.lib                 # │ Vosk + MinGW runtime libraries
-    ├── libgcc_s_seh-1.dll          # │ vendored for Windows builds
-    ├── libstdc++-6.dll             # │ (bundled as resources)
-    ├── libwinpthread-1.dll         # ┘
-    ├── icons/                      # App icons for every platform (ico, icns, PNGs)
-    ├── gen/schemas/                # Generated capability JSON schemas (do not edit)
-    └── target/                     # Cargo build output, incl. release bundles (generated)
+├── index.html                    # Single HTML page Tauri loads (mounts #root)
+├── package.json                  # Frontend deps (React 19, Vite 7, lucide-react) & scripts
+├── vite.config.js                # Vite dev-server config for Tauri (port 1420)
+├── README.md                     # This file
+├── HANDOFF.md                    # Developer handoff notes / design rationale
+├── THIRD_PARTY_NOTICES.md        # License notices for borrowed code (Mimi, Lucide)
+├── docs/                         # Design notes and measurements
+├── eval/                         # Offline translation-quality harness (BLEU/chrF)
+│
+├── src/                          # ── React frontend ──
+│   ├── main.jsx                  # React entry point
+│   ├── App.jsx                   # All app state, IPC wiring, and the three surfaces
+│   ├── App.css                   # Base layer: tokens, motion, scrollbars
+│   ├── overlay.css               # Caption surfaces: canvas, timeline, setup cards
+│   ├── settings.css              # Settings console: sidebar, cards, rows, controls
+│   └── ui/                       # Shared controls, ported from Mimi (see Credits)
+│       ├── Icon.jsx              # Lucide wrapper, icons at 1em in the current colour
+│       ├── PulseRing.jsx/.css    # The "sound light" session-phase indicator
+│       ├── ControlButton.jsx     # 24px overlay control, icon or short word
+│       ├── DragHandle.jsx        # The always-visible move affordance
+│       ├── Select.jsx/.css       # Portalled picker with full keyboard support
+│       ├── Switch.jsx            # Settings toggle
+│       └── Tooltip.jsx/.css      # Shared label for compact controls
+│
+└── src-tauri/                    # ── Rust backend ──
+    ├── src/lib.rs                # Commands, pipelines, model downloads, status events
+    ├── src/audio/                # System-audio capture per platform
+    │   ├── linux.rs              # PulseAudio/PipeWire via `parec`
+    │   ├── windows.rs            # WASAPI loopback
+    │   ├── macos.rs, tap.rs      # Core Audio process tap (macOS 14.4+)
+    │   └── mod.rs                # Shared capture API, preflight, mic fallback
+    ├── src/recognizer/           # Speech recognition backends
+    │   ├── vosk.rs               # Streaming CTC (English)
+    │   └── whisper.rs            # whisper.cpp (Japanese, Spanish)
+    ├── src/chunker/              # Clause-boundary detection, so translation starts early
+    │   ├── japanese.rs
+    │   └── spanish.rs
+    ├── src/marian.rs             # Offline translation via CTranslate2 (`ct2rs`)
+    ├── src/debug.rs              # Diagnostic logging
+    └── src/bin/ja_eval.rs        # Offline eval runner (not shipped in the app)
 ```
 
 ---
 
 ## 🌐 How the EN / JA / ES modes work
 
-The **mode button** in the widget bar cycles through the three modes (click it while stopped: `EN → JA → ES → EN …`). Each mode is a different pipeline under the hood:
+The **mode button** in the overlay cycles the three modes while stopped
+(`EN → JA → ES → EN …`). Each is a different pipeline, and they do not share a recognizer:
+English streams with Vosk, Japanese and Spanish both recognise with Whisper, for reasons
+measured rather than assumed (see [Why this split](#-why-this-split)).
 
 <details>
 <summary><b>🇬🇧 EN — Live English captions</b></summary>
 
 <br>
 
-1. System audio is captured at 16 kHz mono (PulseAudio on Linux, WASAPI loopback on Windows, a Core Audio process tap on macOS).
-2. 250 ms chunks are streamed into the **Vosk English model** (`vosk-model-small-en-us-0.15`).
-3. Vosk emits **partial** results (the sentence being spoken right now, updating live) and **final** results (completed utterances).
-4. Captions appear instantly in the overlay — no translation step, no network, fully offline.
+1. System audio is captured at 16 kHz mono (PulseAudio on Linux, WASAPI loopback on
+   Windows, a Core Audio process tap on macOS).
+2. 250 ms chunks stream into the **Vosk English model** (`vosk-model-small-en-us-0.15`).
+3. Vosk emits **partial** results (the sentence being spoken right now, updating live) and
+   **final** results (completed utterances).
+4. Captions appear as a single-line ticker — no translation step, no network, fully offline.
 
 **Latency:** ~100–200 ms end-to-end — the "YouTube captions" feel.
 
 </details>
 
 <details>
-<summary><b>🇯🇵 JA — Japanese speech → English translation</b></summary>
+<summary><b>🇯🇵 JA — Japanese speech → English</b></summary>
 
 <br>
 
-1. Same audio capture, but streamed into the **Vosk Japanese model** (`vosk-model-small-ja-0.22`).
-2. Live Japanese text is shown at the bottom of the widget as it's spoken (the dimmed line).
-3. When Vosk **finalizes** an utterance, it's sent to a background worker that calls **Ollama** with a translation prompt.
-4. The English translation **streams in word-by-word** and is added to a scrolling history above the live line.
+Japanese is translated **straight from the audio** by Whisper's own translate task. There is
+no Japanese-text middle step, because that handoff is where the meaning was being lost:
 
-**Ollama options** (in ⚙ Settings):
-- **Local** — leave the API key empty; the app talks to `http://localhost:11434`. Pull a model first (e.g. `ollama pull gemma3:27b`) or use the in-app **pull** with progress.
-- **Cloud** — set an [ollama.com](https://ollama.com) API key to use hosted models instead.
+| Path | BLEU | chrF |
+|---|---|---|
+| Whisper transcribe → `ja→en` model | *baseline* | *baseline* |
+| **Whisper translate (direct)** | **+6.67** | **+4.76** |
 
-**LIVE toggle:** press **LIVE** to hide the history and show *only* the current spoken Japanese, big and centered — useful when you just want to shadow speech.
+Measured on a 36-minute multi-speaker clip. The direct path also deletes a stage and a
+240 MB model.
+
+1. Audio streams into **whisper.cpp** with the translate task.
+2. A **chunker** (`src-tauri/src/chunker/japanese.rs`) watches for clause boundaries so a
+   line can be committed before the speaker finishes the sentence.
+3. The in-progress clause is shown as a dimmed, italic **live line** that re-translates and
+   corrects itself as the Japanese predicate lands; committed clauses settle into the
+   history above it.
+
+Set `VID_TRANSLATE_JA_TWO_STAGE=1` to restore the old transcribe-then-translate path for
+hand comparison.
 
 </details>
 
 <details>
-<summary><b>🇪🇸 ES — Spanish speech → English translation</b></summary>
+<summary><b>🇪🇸 ES — Spanish speech → English</b></summary>
 
 <br>
 
-Identical to JA mode, but uses the **Vosk Spanish model** (`vosk-model-small-es-0.42`) for recognition. Live Spanish appears at the bottom; finalized sentences are translated to English via Ollama and pushed into the history. The **LIVE** toggle works the same way.
+Spanish takes the **opposite** decision to Japanese, for the same reason — evidence:
+
+| Path | BLEU | chrF |
+|---|---|---|
+| Vosk → `es→en` model | 30.68 | 62.88 |
+| Whisper translate (direct) | 33.56 | 65.15 |
+| **Whisper transcribe → `es→en` model** | **39.60** | **67.24** |
+
+Measured on a 9.6-minute Spanish clip against human subtitles. Spanish and English are
+close and `es→en` is a strong high-resource model, so nothing is lost handing it text —
+whereas Japanese loses meaning in that same handoff.
+
+Keeping the translation stage also keeps the **Spanish caption line**: one Whisper pass
+yields either the source text or English, never both, and this mode shows source beneath
+translation.
 
 </details>
 
 <details>
-<summary><b>📥 Speech models — auto-download</b></summary>
+<summary><b>🌐 Translation: Ollama or fully offline</b></summary>
 
 <br>
 
-The first time you start a mode whose model is missing, the widget shows a **Download** button. One click fetches the model from `alphacephei.com`, shows progress, and extracts it to:
+Wherever a translation stage exists (ES always; JA only in two-stage mode), it runs one of
+two ways, switched by **LOCAL** in the overlay or **Translate locally** in Settings:
+
+- **Ollama** — leave the API key empty to use `http://localhost:11434`, or set an
+  [ollama.com](https://ollama.com) key for hosted models. Settings can **pull** a model with
+  a progress bar.
+- **Local / offline** — a quantized **CTranslate2** Marian model (`ct2rs`), downloaded on
+  demand. No network, no Ollama, no API key.
+
+</details>
+
+<details>
+<summary><b>📥 Models — all downloaded on demand</b></summary>
+
+<br>
+
+The first time you start a mode whose model is missing, the overlay shows a **Download**
+card with progress. Everything lands under one directory:
 
 ```
-~/.local/share/vid_translate/          (Linux)
-%LOCALAPPDATA%\vid_translate\          (Windows)
-~/Library/Application Support/vid_translate/   (macOS)
-    ├── vosk-model        # English
-    ├── vosk-model-ja     # Japanese
-    └── vosk-model-es     # Spanish
+~/.local/share/vid_translate/                   (Linux)
+%LOCALAPPDATA%\vid_translate\                   (Windows)
+~/Library/Application Support/vid_translate/    (macOS)
+    ├── vosk-model              # English recognition
+    ├── ggml-small.bin          # Whisper, for JA and ES — size is your choice
+    ├── ct2-model-ja            # Offline ja→en (only for two-stage mode)
+    └── ct2-model-es            # Offline es→en
 ```
 
-No manual steps needed.
+Whisper sizes run from **Tiny (31 MB)** to **Medium (1.4 GB)**; `small` is the default and
+what the numbers above were measured at. If captions fall further and further behind the
+audio, that machine cannot keep up with the current size — drop one. The `q5` entries are
+the same models quantized: about a third of the size and noticeably faster, for a small
+accuracy loss.
 
 </details>
 
@@ -161,7 +218,7 @@ No manual steps needed.
 | **Rust** (stable) + Cargo | Install via [rustup](https://rustup.rs) |
 | **Tauri v2 system deps** | Linux: `webkit2gtk-4.1`, `libappindicator`, etc. — see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). macOS: Xcode Command Line Tools + CMake (`brew install cmake`) |
 | **libvosk (macOS only)** | `bash scripts/fetch-libvosk-macos.sh` once before the first build |
-| **Ollama** *(optional)* | Only needed for JA/ES translation — [ollama.com/download](https://ollama.com/download) |
+| **Ollama** *(optional)* | Only for Ollama-backed translation; the offline CTranslate2 path needs nothing — [ollama.com/download](https://ollama.com/download) |
 
 ### Steps
 
@@ -179,7 +236,7 @@ silently produces nothing at all. The script builds, signs the binary with the r
 identifier, and then starts the dev server. macOS asks for permission again after each
 rebuild, because ad-hoc signatures change every time.
 
-- First compile takes **5–15 minutes** (builds the Vosk bindings). Later builds are fast.
+- First compile takes **5–15 minutes** (builds the Vosk bindings, whisper.cpp and CTranslate2). Later builds are fast.
 - The frontend hot-reloads; Rust changes trigger a rebuild.
 
 ---
@@ -203,14 +260,14 @@ npx tauri build --bundles appimage
 Output lands in:
 
 ```
-src-tauri/target/release/bundle/appimage/VidTranslate_0.0.4_amd64.AppImage
+src-tauri/target/release/bundle/appimage/VidTranslate_0.0.6_amd64.AppImage
 ```
 
 First run — make it executable:
 
 ```bash
-chmod +x src-tauri/target/release/bundle/appimage/VidTranslate_0.0.4_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/VidTranslate_0.0.4_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/VidTranslate_0.0.6_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/VidTranslate_0.0.6_amd64.AppImage
 ```
 
 > `libvosk.so` is bundled inside the AppImage (via `tauri.linux.conf.json` + rpath magic in `build.rs`) — no system-wide Vosk install needed.
@@ -289,25 +346,67 @@ button, which captures the default input device instead of system audio.
 
 ## ⚙️ Settings
 
-Open with the **⚙** button. Everything persists in `localStorage`:
+Open the console with the **⚙** control. Everything persists in `localStorage` and applies
+when you press **Save**.
+
+**Translation**
 
 | Setting | Default | Notes |
 |---|---|---|
 | Ollama API key | *(empty)* | Empty = local Ollama at `localhost:11434` |
-| Ollama model | `gemma3:27b` | Any model Ollama can run/pull |
-| Font / Font scale | System UI / 1.0× | |
-| Opacity | 0.78 | Overlay background transparency |
-| Width | *(full display)* | Set a px value for a narrower widget (also makes it draggable on both axes) |
-| EN height / JA-ES height | 90 / 280 px | Per-mode widget heights |
-| **Reset** | | Restores UI defaults but keeps your Ollama key & model |
+| Ollama model | `gemma3:27b` | Any model Ollama can run or pull |
+| Translate locally | off | Use the offline CTranslate2 model instead of Ollama |
+| Pull a model | | Downloads into the local Ollama, with progress |
 
-Manually resizing the window with the mouse **updates and saves** these presets automatically. The widget also remembers **where you last placed it** and reopens there.
+**Speech**
+
+| Setting | Default | Notes |
+|---|---|---|
+| Whisper model size | `small` | Tiny → Medium, quantized variants included |
+| Capture the microphone | off | macOS — caption the mic instead of system audio |
+
+**Appearance**
+
+| Setting | Default | Notes |
+|---|---|---|
+| Font | System UI | |
+| Font size | 1.0× | Scales every caption surface at once |
+| Opacity | 0.78 | Overlay background transparency |
+
+**Layout**
+
+| Setting | Default | Notes |
+|---|---|---|
+| Width | *(full display)* | A px value gives a narrower, freely draggable overlay |
+| English height | 100 px | The compact ticker, also used by **LIVE** |
+| JA/ES height | 280 px | The taller canvas with history |
+
+**Reset to defaults** in the sidebar restores the UI settings but keeps your Ollama key and
+model. Resizing the window with the mouse also updates and saves these presets, and the
+overlay reopens where you last put it.
 
 ---
 
-## 🧠 Why Vosk (not Whisper)?
+## 🧠 Why this split
 
-Whisper is a batch encoder-decoder — it always processes a 30-second window, adding multi-second lag. Vosk is a **streaming CTC model**: partial words appear as they're spoken, giving true live-caption latency. For JA/ES, translation quality comes from Ollama instead, keeping recognition streaming and only translating finalized sentences.
+English uses **Vosk**; Japanese and Spanish use **Whisper**. That is not an inconsistency,
+it is the measurement.
+
+Vosk is a streaming CTC model: partial words appear as they are spoken, which is the entire
+point of a live English ticker. Whisper is a batch encoder-decoder that works on windows,
+so it is seconds behind — unacceptable for English captions, and irrelevant for translation,
+where you are waiting on a clause to finish anyway.
+
+For translation, accuracy wins, and Whisper's is far better on Japanese. Which *path* is
+best then depends on the language pair, and the two go opposite ways:
+
+- **Japanese** translates best **directly from audio** (+6.67 BLEU over transcribe-then-
+  translate). Japanese→English text handoff loses too much.
+- **Spanish** translates best **through text** (+6.04 BLEU over Whisper's direct task),
+  because `es→en` is a strong model and the pair is close.
+
+See [How the modes work](#-how-the-en--ja--es-modes-work) for the full tables, and `eval/`
+for the harness that produced them.
 
 ---
 
@@ -315,12 +414,30 @@ Whisper is a batch encoder-decoder — it always processes a 30-second window, a
 
 - [Tauri v2](https://v2.tauri.app/) — window shell, IPC, bundling
 - [React 19](https://react.dev/) + [Vite 7](https://vitejs.dev/) — frontend
-- [Vosk](https://alphacephei.com/vosk/) — streaming speech recognition (EN/JA/ES models)
-- [Ollama](https://ollama.com/) — LLM translation (local or cloud)
-- PulseAudio/PipeWire (`parec`) on Linux, WASAPI loopback on Windows, Core Audio process taps on macOS — system audio capture
+- [Lucide](https://lucide.dev) — icons
+- [Vosk](https://alphacephei.com/vosk/) — streaming English recognition
+- [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — Japanese and Spanish recognition
+- [CTranslate2](https://github.com/OpenNMT/CTranslate2) via `ct2rs` — offline translation
+- [Ollama](https://ollama.com/) — LLM translation, local or cloud
+- PulseAudio/PipeWire (`parec`) on Linux, WASAPI loopback on Windows, Core Audio process
+  taps on macOS — system audio capture
+
+---
+
+## 🙏 Credits
+
+The user interface — the overlay chrome, the activity indicator, the settings
+console and the shared controls in `src/ui/` — is derived from
+**[Mimi](https://github.com/yuxino/Mimi)** by [yuxino](https://github.com/yuxino),
+used under the MIT license. Mimi is a live speech-translation app for desktop and
+Android, and its interface is the reason this one looks the way it does; if you
+like the look here, go star the original.
+
+Full notice and license text: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
 ## 📄 License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE), with third-party components under their own
+licenses — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
