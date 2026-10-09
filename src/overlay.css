@@ -1,0 +1,374 @@
+/* The caption surfaces, following Mimi's overlay window: one dark rounded
+   canvas, an always-visible drag affordance at the top, a cluster of 24px
+   controls that comes forward on hover, and text that is the only thing with
+   full contrast.
+
+   Two shapes, as in Mimi: a compact single row (our English ticker, and any
+   setup card) and an expanded canvas with a scrolling timeline (JA/ES). */
+
+/* ── Canvas ────────────────────────────────────────────────────────────── */
+
+.overlay {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 5px;
+  border-radius: 16px;
+  border: 0.75px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, var(--bg-opacity, 0.78));
+  backdrop-filter: blur(8px);
+  /* blur must stay <= the #root inset or the shadow hard-clips at the window edge */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-family, var(--ui-font));
+  transition: border-color 160ms ease;
+}
+
+/* Hover is the overlay's only self-announcement: the edge picks up the accent
+   so it is clear the window itself can be grabbed and acted on. */
+.overlay:hover {
+  border-width: 1px;
+  border-color: rgba(122, 168, 255, 0.34);
+}
+
+.overlay--compact {
+  border-radius: 14px;
+  padding: 0 10px;
+}
+
+.overlay__row {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Drag affordance ──────────────────────────────────────────────────── */
+
+/* Always-visible, dimmed while idle and full on hover. A fully transparent
+   handle leaves no cue that the overlay can be moved. */
+.overlay__band {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 34px;
+  opacity: 0.55;
+  transition: opacity 160ms ease-out;
+}
+
+.overlay:hover .overlay__band {
+  opacity: 1;
+}
+
+.overlay-drag-handle {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+}
+
+.overlay--compact .overlay-drag-handle {
+  position: static;
+  transform: none;
+}
+
+.overlay-drag-handle__hit {
+  display: flex;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  cursor: move;
+}
+
+.overlay--compact .overlay-drag-handle__hit {
+  width: 42px !important;
+  height: 30px;
+}
+
+.overlay-drag-handle__bar {
+  height: 3px;
+  border-radius: 1.5px;
+  transition: width 120ms ease, background 120ms ease;
+}
+
+/* ── Controls ─────────────────────────────────────────────────────────── */
+
+.overlay__controls {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.75;
+  transition: opacity 120ms ease;
+}
+
+.overlay__controls--left {
+  top: 6px;
+  left: 8px;
+}
+
+.overlay__controls--right {
+  top: 6px;
+  right: 8px;
+}
+
+.overlay:hover .overlay__controls {
+  opacity: 1;
+}
+
+.overlay--compact .overlay__controls {
+  position: static;
+  opacity: 1;
+}
+
+.overlay__spacer {
+  flex: 1;
+  min-width: 4px;
+}
+
+/* ── Empty state ──────────────────────────────────────────────────────── */
+
+.overlay__empty {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.overlay__empty-text {
+  width: 100%;
+  min-width: 0;
+  padding: 0 24px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: calc(15px * var(--font-scale, 1));
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: center;
+}
+
+/* A compact row has no vertical room for the prominent pulse, so the phase
+   reads from the inline indicator and the text stays on one line. */
+.overlay__phase--fill {
+  flex: 1;
+}
+
+.overlay__phase {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: calc(12px * var(--font-scale, 1));
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Timeline ─────────────────────────────────────────────────────────── */
+
+.overlay__body {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  /* The top band floats over the canvas, so reserve its exact height or the
+     subtitle rows slide underneath the controls. */
+  padding-top: 34px;
+}
+
+.overlay-timeline {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 0 10px;
+  outline: none;
+  scrollbar-width: thin;
+}
+
+.overlay-timeline:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.6);
+  outline-offset: -1px;
+}
+
+/* Short output stays at the reading edge instead of hanging beneath the
+   controls. Auto margin yields to zero once the history overflows, so every
+   sentence remains scrollable. */
+.overlay-timeline > :first-child {
+  margin-top: auto;
+}
+
+/* Vertical rhythm: lines of one utterance sit close, sentences breathe. */
+.subtitle-block {
+  flex-shrink: 0;
+  padding: 2px 0 3px;
+  color: #fff;
+  font-size: calc(19px * var(--font-scale, 1));
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: break-word;
+  /* Settled history recedes so the newest sentence is the one being read. */
+  opacity: 0.52;
+}
+
+.subtitle-block--latest {
+  opacity: 1;
+}
+
+/* The in-progress line: still being revised, so it reads as live rather than
+   as something already said. */
+.subtitle-block--live {
+  color: var(--accent);
+  opacity: 1;
+}
+
+/* A re-translation of an unfinished clause — it will be replaced as the
+   speaker finishes, so it stays visibly tentative. */
+.subtitle-block--provisional {
+  color: rgba(122, 168, 255, 0.62);
+  font-weight: 400;
+  font-style: italic;
+}
+
+/* The recognised original, kept as a neutral reference lane under the
+   translation it produced. */
+.subtitle-block--source {
+  color: rgba(255, 255, 255, 0.46);
+  font-size: calc(14px * var(--font-scale, 1));
+  font-weight: 400;
+}
+
+/* ── Setup cards ──────────────────────────────────────────────────────── */
+
+/* Model downloads and audio faults are routine, not edge cases, so they get a
+   proper centred card on the same canvas rather than an error strip. */
+.setup-card {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 22px;
+  text-align: center;
+}
+
+.setup-card__title {
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.setup-card__message {
+  max-width: 560px;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.setup-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.setup-card__progress {
+  width: min(420px, 100%);
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.setup-card__progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 200ms ease;
+}
+
+.setup-card__progress-fill--indeterminate {
+  animation: setup-progress-indeterminate 1.1s ease-in-out infinite;
+}
+
+@keyframes setup-progress-indeterminate {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
+
+.setup-card__percent {
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Pill action, matching the settings console's buttons but sized for the
+   overlay's smaller type. */
+.overlay-button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.06);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.overlay-button:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+.overlay-button--primary {
+  border-color: transparent;
+  color: #101010;
+  background: #f4f4f4;
+}
+
+.overlay-button--primary:hover:not(:disabled) {
+  border-color: transparent;
+  color: #101010;
+  background: #fff;
+}
+
+.overlay-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* ── English ticker ───────────────────────────────────────────────────── */
+
+.overlay__ticker {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: #fff;
+  font-size: calc(19px * var(--font-scale, 1));
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Words already finalised by the recogniser read at full contrast; the tail it
+   is still revising stays dim until it settles. */
+.overlay__word--spoken { color: rgba(255, 255, 255, 0.66); }
+.overlay__word--final  { color: #fff; }
+.overlay__word--current { color: var(--accent); }
+.overlay__word--source  { color: rgba(255, 255, 255, 0.46); }

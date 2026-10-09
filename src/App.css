@@ -1,9 +1,26 @@
+/* Base layer and motion vocabulary, ported from Mimi's `src/index.css`.
+   The surfaces themselves live in overlay.css and settings.css. */
+@import "./overlay.css";
+@import "./settings.css";
+
 :root {
-  --accent: #818cf8;
-  --accent-strong: #6366f1;
-  --ok: #4ade80;
-  --warn: #facc15;
-  --err: #f87171;
+  --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+    "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "DengXian", "SimHei", "Noto Sans CJK SC", "Hiragino Sans",
+    "Yu Gothic UI", "Meiryo", "Malgun Gothic", system-ui, sans-serif;
+  font-family: var(--ui-font);
+
+  /* The overlay accent: the one hue that marks "this responds to you". */
+  --accent: #7aa8ff;
+}
+
+/* Japanese and Spanish captions are the app's subject, so the caption surfaces
+   ask for a font stack that renders kana and kanji natively rather than
+   falling back per glyph. */
+:root:lang(ja) {
+  --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+    "Segoe UI", "Hiragino Sans", "Yu Gothic UI", "Meiryo", "Noto Sans CJK JP",
+    "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
 }
 
 * {
@@ -19,668 +36,87 @@ body,
   height: 100%;
   background: transparent;
   overflow: hidden;
+  -webkit-user-select: none;
   user-select: none;
+  cursor: default;
 }
 
-/* Breathing room so the bar's rounded corners and shadow are visible even when the
-   window spans the full display width. Keep small: the transparent ring still belongs
-   to the window rect and blocks clicks to whatever is behind it. */
+/* Breathing room so the overlay's rounded corners and shadow are visible even
+   when the window spans the full display width. Keep small: the transparent
+   ring still belongs to the window rect and blocks clicks to what is behind. */
 #root {
   padding: 8px;
 }
 
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  height: 100%;
-  padding: 0 16px;
-  background: rgba(0, 0, 0, var(--bg-opacity, 0.78));
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(8px);
-  border-radius: 14px;
-  /* blur must stay <= the #root inset or the shadow hard-clips at the window edge */
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-  cursor: move;
-  position: relative;
+/* The settings console is a document, not a floating caption surface: it gets
+   an opaque canvas and its own window padding. */
+body.settings-body,
+body.settings-body #root {
+  background: #161616;
+  padding: 0;
 }
 
-.btn {
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  font-size: 13px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
-}
-
-.btn:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-.btn:active {
-  transform: scale(0.92);
-}
-
-.btn--toggle {
-  color: var(--ok);
-  border-color: rgba(74, 222, 128, 0.4);
-}
-.btn--toggle:hover {
-  background: rgba(74, 222, 128, 0.15);
-}
-
-.btn--toggle-running {
-  color: var(--err);
-  border-color: rgba(248, 113, 113, 0.4);
-}
-.btn--toggle-running:hover {
-  background: rgba(248, 113, 113, 0.15);
-}
-
-.btn--mode {
-  width: auto;
-  padding: 0 10px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  opacity: 0.7;
-}
-
-/* Text buttons are pills; the circular .btn default is for icon buttons only. */
-.btn--pill {
-  width: auto;
-  height: 30px;
-  padding: 0 16px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.btn--pill-primary {
-  background: var(--accent-strong);
-  border-color: transparent;
-}
-.btn--pill-primary:hover {
-  background: var(--accent);
-}
-
-.btn--mode:disabled {
-  cursor: default;
-  opacity: 0.4;
-}
-
-.btn--mode-active {
-  border-color: #f472b6;
-  color: #f472b6;
-  opacity: 1;
-}
-
-.dot {
-  flex-shrink: 0;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  transition: background 0.3s;
-}
-
-.dot--listening {
-  background: #4ade80;
-  box-shadow: 0 0 6px #4ade80;
-  animation: pulse 1.5s infinite;
-}
-
-.dot--processing {
-  background: #facc15;
-  box-shadow: 0 0 6px #facc15;
-}
-
-.dot--loading,
-.dot--loading_model {
-  background: #60a5fa;
-  box-shadow: 0 0 6px #60a5fa;
-  animation: pulse 1s infinite;
-}
-
-.dot--idle {
-  background: rgba(255, 255, 255, 0.3);
-}
-
-.dot--error {
-  background: var(--err);
-  box-shadow: 0 0 6px var(--err);
-}
-
-/* The empty bar while a model loads or the first window fills. A slow breath reads as
-   "working", where static grey text reads as "stuck" — the wait is the same length either
-   way, which is the point. */
-.placeholder--working {
-  animation: breathe 1.8s ease-in-out infinite;
-}
-
-@keyframes breathe {
-  0%,
-  100% {
-    opacity: 0.45;
-  }
-  50% {
-    opacity: 0.85;
-  }
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-}
-
-.transcript {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  cursor: move;
-  pointer-events: none;
-}
-
-.caption {
-  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  font-size: calc(clamp(14px, 2.2vw, 32px) * var(--font-scale, 1));
-  font-weight: 500;
-  line-height: 1.3;
-  white-space: nowrap;
-  text-align: center;
-}
-
-/* Already-spoken words in the current partial — dim gray */
-.word--spoken {
-  color: rgba(255, 255, 255, 0.45);
-}
-
-/* The word being spoken right now — bright white, slightly larger */
-.word--current {
-  color: #ffffff;
-  text-shadow: 0 0 12px rgba(255, 255, 255, 0.6);
-}
-
-/* All words in a finalized sentence — full white */
-.word--final {
-  color: #ffffff;
-}
-
-/* The word currently being spoken in Japanese mode — cyan glow */
-.word--current-ja {
-  color: #67e8f9;
-  text-shadow: 0 0 12px rgba(103, 232, 249, 0.6);
-}
-
-.placeholder {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: clamp(12px, 1.4vw, 20px);
-  color: rgba(255, 255, 255, 0.35);
-  font-style: italic;
-}
-
-/* ── JA drama mode ─────────────────────────────────────── */
-.bar--ja {
-  flex-direction: column;
-  align-items: flex-start;
-  height: 100%;
-  padding: 10px 16px 14px;
-  gap: 8px;
-}
-
-/* shared top bar row — used in both EN and JA modes */
-.bar-top {
-  display: flex;
-  align-items: center;
-  width: 100%;
-}
-
-.bar-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  position: relative;
-  z-index: 1;
-}
-
-.bar-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  margin-left: auto;
-  /* sit above the absolutely-positioned transcript */
-  position: relative;
-  z-index: 1;
-}
-
-/* no history to show — center the streaming/live text vertically */
-.ja-body--center {
-  justify-content: center;
-}
-
-.btn--live-active {
-  border-color: var(--ok);
-  color: var(--ok);
-  opacity: 1;
-}
-
-.ja-body {
-  width: 100%;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  cursor: move;
-}
-
-/* history takes all leftover space; pending + live lines stay pinned below it */
-.ja-history {
-  width: 100%;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-right: 4px;
-  /* hide scrollbar on non-hover for clean look */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255,255,255,0.15) transparent;
-}
-
-/* pin content to the bottom of the history area while keeping it scrollable */
-.ja-history > :first-child {
-  margin-top: auto;
-}
-
-.ja-history::-webkit-scrollbar        { width: 4px; }
-.ja-history::-webkit-scrollbar-track  { background: transparent; }
-.ja-history::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.15); border-radius: 2px; }
-
-.ja-history-item {
-  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  font-size: calc(clamp(13px, 1.8vw, 24px) * var(--font-scale, 1));
-  font-weight: 400;
-  color: rgba(255, 255, 255, 0.35);
-  text-align: center;
-  line-height: 1.3;
-  transition: color 0.4s;
-}
-
-.ja-history-item--latest {
-  font-size: calc(clamp(16px, 2.4vw, 34px) * var(--font-scale, 1));
-  font-weight: 700;
-  color: #ffffff;
-  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.5);
-  animation: rise-in 0.25s ease-out;
-}
-
-@keyframes rise-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.ja-pending {
-  flex-shrink: 1;
-  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  font-size: calc(clamp(16px, 2.4vw, 34px) * var(--font-scale, 1));
-  font-weight: 700;
-  color: rgba(255, 255, 255, 0.55);
-  text-align: center;
-  width: 100%;
-  font-style: italic;
-  line-height: 1.3;
-  max-height: 100%;
-  overflow: hidden;
-}
-
-/* A live line that is still a guess: the clause has not reached its predicate yet, so the
-   English will be re-translated and replaced as the speaker finishes. Dimmed further than
-   the ordinary pending line so "this may change" is readable at a glance. */
-.ja-pending--provisional {
-  color: rgba(255, 255, 255, 0.34);
-}
-
-.ja-japanese {
-  flex-shrink: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: calc(clamp(12px, 1.5vw, 18px) * var(--font-scale, 1));
-  color: rgba(255, 255, 255, 0.6);
-  text-align: center;
-  width: 100%;
-  letter-spacing: 0.04em;
-  padding-top: 4px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-}
-
-/* ── Setup screens (model download / audio setup) ─────── */
-.setup-screen {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: move;
-}
-
-.setup-card {
-  width: fit-content;
-  max-width: min(600px, 100%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 10px;
-  padding: 16px 20px;
-  background: rgba(0, 0, 0, var(--bg-opacity, 0.78));
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(8px);
-  border-radius: 16px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-}
-
-.setup-title {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 13px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.95);
-}
-
-.setup-msg {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.65);
-  line-height: 1.5;
-  max-width: 46ch;
-  /* download errors can contain long unbroken URLs */
-  overflow-wrap: anywhere;
-}
-
-.setup-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-}
-
-.setup-progress-track {
-  width: 240px;
-  max-width: 100%;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.setup-progress-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 2px;
-  transition: width 0.25s;
-}
-
-/* no byte total yet / extracting — full-width pulsing fill */
-.setup-progress-fill--indet {
-  animation: pulse 1.5s infinite;
-}
-
-.setup-progress-pct {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.4);
-}
-
-/* ── Settings + Close action buttons ──────────────────── */
-.btn--settings,
-.btn--close {
-  width: 40px;
-  height: 40px;
-  font-size: 18px;
-  border-radius: 12px;
-}
-
-.btn--settings {
-  color: rgba(255, 255, 255, 0.65);
-}
-.btn--settings:hover {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.15);
-}
-
-.btn--close {
-  color: rgba(255, 255, 255, 0.5);
-}
-.btn--close:hover {
-  color: #fff;
-  background: rgba(220, 50, 50, 0.35);
-  border-color: rgba(220, 50, 50, 0.5);
-}
-
-/* ── Settings window ───────────────────────────────────── */
-.settings-window {
-  width: 100%;
-  height: 100%;
-  background: rgba(12, 12, 14, 0.97);
-  border-radius: 14px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  /* Force browser form controls (select, input) to use dark variants */
-  color-scheme: dark;
-}
-
-.settings-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-  flex-shrink: 0;
-  cursor: move;
-}
-
-.settings-title {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.7);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.settings-form {
-  flex: 1;
-  overflow-y: auto;
-  padding: 4px 14px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
-}
-
-.settings-section {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 9px;
-  font-weight: 700;
-  color: rgba(255, 255, 255, 0.28);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  margin-top: 10px;
-  margin-bottom: 1px;
-}
-
-.settings-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.settings-row input[type="range"] {
-  flex: 1;
-  accent-color: var(--accent-strong);
+/* Shared click affordance; component-specific disabled, busy and resize
+   cursors stay authoritative. Text fields and ranges keep native cursors. */
+:where(
+  button,
+  a[href],
+  summary,
+  select,
+  [role="button"],
+  [role="switch"],
+  [role="option"],
+  input[type="button"],
+  input[type="submit"],
+  input[type="checkbox"],
+  input[type="radio"]
+):where(:not(:disabled):not([disabled]):not([aria-disabled="true"]):not([aria-busy="true"])) {
   cursor: pointer;
 }
 
-.settings-row label {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.55);
-  width: 78px;
-  flex-shrink: 0;
+/* Keep letters fully visible. A new sentence settles by position only;
+   revisions update the same text node without fading it out and back in. */
+@keyframes subtitle-block-enter {
+  from { transform: translateY(2px); }
+  to   { transform: translateY(0); }
 }
 
-.settings-input {
-  flex: 1;
-  min-width: 0;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
-  color: #fff;
-  font-size: 11px;
-  padding: 4px 8px;
-  outline: none;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  appearance: none;
-  -webkit-appearance: none;
-}
-.settings-input:focus {
-  border-color: var(--accent);
-  background: rgba(255, 255, 255, 0.09);
-  box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.2);
-}
-.settings-input::placeholder {
-  color: rgba(255, 255, 255, 0.2);
-}
-.settings-input--num {
-  width: 70px;
-  flex: none;
+.subtitle-block {
+  animation: subtitle-block-enter 140ms ease-out;
+  /* Aging is a state change, not a decoration: glide between steps instead of
+     stepping in one frame. */
+  transition: opacity 260ms ease;
 }
 
-.settings-hint {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 9px;
-  color: rgba(255, 255, 255, 0.25);
-  margin-left: 86px;
-  margin-top: -1px;
+/* Off means the surfaces keep every state change but drop all decoration, so
+   the overlay stays readable. */
+@media (prefers-reduced-motion: reduce) {
+  .subtitle-block {
+    animation: none;
+    transition: none;
+  }
 }
 
-.settings-val {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.4);
-  width: 34px;
-  text-align: right;
-  flex-shrink: 0;
+/* Thin, unobtrusive scrollbars for the caption history. */
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
 
-.settings-unit {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.25);
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
 }
 
-.settings-footer {
-  padding: 8px 14px 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-  display: flex;
-  justify-content: space-between;
-  flex-shrink: 0;
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.btn--reset {
-  width: auto;
-  padding: 0 16px;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.55);
+/* Accessible focus ring for keyboard navigation. */
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+[role="switch"]:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
-.btn--reset:hover {
-  color: var(--err);
-  border-color: rgba(248, 113, 113, 0.5);
-  background: rgba(248, 113, 113, 0.12);
-}
-
-.btn--save {
-  width: auto;
-  padding: 0 22px;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 600;
-  background: rgba(99, 102, 241, 0.25);
-  border-color: rgba(99, 102, 241, 0.5);
-  color: rgba(180, 182, 255, 0.9);
-}
-.btn--save:hover {
-  background: rgba(99, 102, 241, 0.45);
-}
-
-/* ── Pull model ────────────────────────────────────────── */
-.btn--pull {
-  width: auto;
-  padding: 0 12px;
-  border-radius: 6px;
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
-.pull-status {
-  margin-left: 86px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.pull-bar-track {
-  height: 3px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.pull-bar-fill {
-  height: 100%;
-  background: #4ade80;
-  border-radius: 2px;
-  transition: width 0.25s;
-}
-
-.pull-msg {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 9px;
-  color: rgba(255, 255, 255, 0.35);
-}
-.pull-msg--done  { color: #4ade80; }
-.pull-msg--error { color: #f87171; }

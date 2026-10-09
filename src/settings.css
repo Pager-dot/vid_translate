@@ -1,0 +1,560 @@
+/* The settings console, ported from Mimi's `src/windows/settings/settings.css`:
+   a fixed sidebar of categories beside a scrolling pane of cards, where each
+   card is a stack of rows whose label and description sit left of the control.
+   Everything is driven off the token block below. */
+
+.settings-console {
+  --settings-canvas: #161616;
+  --settings-panel: #111111;
+  --settings-panel-raised: #1a1a1a;
+  --settings-control: #202020;
+  --settings-ink: 255, 255, 255;
+  --settings-border: rgba(var(--settings-ink), 0.1);
+  --settings-border-strong: rgba(var(--settings-ink), 0.18);
+  --settings-text: #f4f4f4;
+  --settings-text-muted: #adadad;
+  --settings-text-faint: #8a8a8a;
+  --settings-selection-soft: rgba(var(--settings-ink), 0.075);
+  --settings-danger: #ff938d;
+  --settings-success: #9ae66e;
+
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  color: var(--settings-text);
+  background: var(--settings-canvas);
+  font-family: var(--ui-font);
+  font-size: 14px;
+  line-height: 1.45;
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+}
+
+.settings-console *,
+.settings-console *::before,
+.settings-console *::after {
+  box-sizing: border-box;
+}
+
+:where(.settings-console button, .settings-console input, .settings-console select) {
+  font: inherit;
+}
+
+.settings-console h1,
+.settings-console h2,
+.settings-console p {
+  margin: 0;
+}
+
+.settings-console ::-webkit-scrollbar-thumb {
+  background: var(--settings-border-strong);
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────────── */
+
+.settings-sidebar {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 18px 14px 14px;
+  border-right: 1px solid var(--settings-border);
+  background: var(--settings-panel);
+}
+
+.settings-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 12px 20px;
+  cursor: move;
+}
+
+.settings-brand__name {
+  color: var(--settings-text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settings-brand__label {
+  color: var(--settings-text-faint);
+  font-size: 11px;
+}
+
+.settings-category-nav {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+}
+
+.settings-category-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--settings-text-faint);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.settings-category-nav__item svg {
+  flex: 0 0 auto;
+  font-size: 15px;
+}
+
+.settings-category-nav__item:hover:not(.is-selected) {
+  color: var(--settings-text);
+  background: var(--settings-selection-soft);
+}
+
+.settings-category-nav__item.is-selected {
+  color: var(--settings-text);
+  background: var(--settings-selection-soft);
+  font-weight: 650;
+}
+
+.settings-category-nav__item.is-selected svg {
+  stroke-width: 2.2;
+}
+
+.settings-sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 14px;
+  border-top: 1px solid var(--settings-border);
+}
+
+/* ── Pane ─────────────────────────────────────────────────────────────── */
+
+.settings-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.settings-pane__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 26px 14px;
+  cursor: move;
+}
+
+.settings-pane__header h1 {
+  color: var(--settings-text);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.settings-pane__header p {
+  max-width: 560px;
+  margin-top: 3px;
+  color: var(--settings-text-faint);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-pane__scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 26px 10px;
+}
+
+.settings-category-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 30px;
+}
+
+.settings-pane__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 13px 26px;
+  border-top: 1px solid var(--settings-border);
+  background: var(--settings-panel);
+}
+
+.settings-pane__footer-note {
+  margin-right: auto;
+  color: var(--settings-text-faint);
+  font-size: 11.5px;
+}
+
+/* ── Cards and rows ───────────────────────────────────────────────────── */
+
+.settings-card {
+  min-width: 0;
+}
+
+.settings-card__header {
+  margin-bottom: 16px;
+}
+
+.settings-card__header h2 {
+  color: var(--settings-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-card__body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.settings-card__body > .settings-row + .settings-row {
+  margin-top: 16px;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(0, 276px);
+  align-items: center;
+  gap: 8px 18px;
+  min-height: 36px;
+}
+
+/* A switch or a short pill needs no 276px column: let the copy have the room. */
+.settings-row--tight {
+  grid-template-columns: minmax(120px, 1fr) minmax(0, auto);
+}
+
+.settings-row__copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-row__label {
+  color: var(--settings-text);
+  font-size: 12.5px;
+  font-weight: 590;
+}
+
+.settings-row__description {
+  max-width: 420px;
+  color: var(--settings-text-faint);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-row__feedback {
+  grid-column: 1 / -1;
+  min-width: 0;
+  color: var(--settings-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.settings-row__control {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-row__control > .mimi-select {
+  width: 100%;
+}
+
+.settings-divider {
+  height: 1px;
+  margin: 18px 0;
+  background: var(--settings-border);
+}
+
+.settings-help {
+  color: var(--settings-text-faint);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ── Fields ───────────────────────────────────────────────────────────── */
+
+.settings-console input[type="text"],
+.settings-console input[type="password"],
+.settings-console input[type="number"] {
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--settings-border-strong);
+  border-radius: 9px;
+  color: var(--settings-text);
+  background: var(--settings-control);
+  outline: 0;
+}
+
+.settings-console input::placeholder {
+  color: var(--settings-text-faint);
+}
+
+.settings-console input:focus-visible,
+.settings-console select:focus-visible {
+  border-color: rgba(var(--settings-ink), 0.56);
+}
+
+.settings-console button:focus-visible,
+.settings-console input:focus-visible,
+.settings-console [role="switch"]:focus-visible {
+  outline: 2px solid var(--settings-text);
+  outline-offset: 2px;
+}
+
+.settings-console button:disabled,
+.settings-console input:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+/* A number that means pixels says so inside the field's row, not in the field. */
+.settings-unit {
+  flex: 0 0 auto;
+  color: var(--settings-text-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.settings-range {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-range input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--settings-text);
+  cursor: pointer;
+}
+
+.settings-range output {
+  flex: 0 0 auto;
+  min-width: 40px;
+  color: var(--settings-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ── Switch ───────────────────────────────────────────────────────────── */
+
+.mimi-switch {
+  position: relative;
+  display: inline-flex;
+  width: 40px;
+  height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(var(--settings-ink, 255, 255, 255), 0.2);
+  cursor: pointer;
+  transition: background-color 160ms ease;
+}
+
+.mimi-switch.is-checked {
+  background: var(--settings-text, #f4f4f4);
+}
+
+.mimi-switch:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.mimi-switch__thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transform: translateX(0);
+  transition: transform 160ms ease;
+}
+
+.mimi-switch.is-checked .mimi-switch__thumb {
+  background: var(--settings-canvas, #161616);
+  transform: translateX(16px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mimi-switch,
+  .mimi-switch__thumb {
+    transition: none;
+  }
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+
+.settings-button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-size: 11.75px;
+  font-weight: 630;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease,
+    color 140ms ease, opacity 140ms ease, transform 140ms ease;
+}
+
+.settings-button svg {
+  font-size: 12px;
+}
+
+.settings-button:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.settings-button:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.settings-button--compact {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+
+.settings-button--quiet {
+  border-color: var(--settings-border-strong);
+  color: var(--settings-text-muted);
+  background: var(--settings-control);
+}
+
+.settings-button--primary {
+  color: var(--settings-canvas);
+  background: var(--settings-text);
+}
+
+.settings-button--danger {
+  border-color: currentColor;
+  color: var(--settings-danger);
+  background: transparent;
+}
+
+/* A sidebar action is a quiet button that fills its column. */
+.settings-sidebar-action {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--settings-text-faint);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.settings-sidebar-action svg {
+  flex: 0 0 auto;
+  font-size: 14px;
+}
+
+.settings-sidebar-action:hover:not(:disabled) {
+  color: var(--settings-text);
+  background: var(--settings-selection-soft);
+}
+
+/* ── Feedback ─────────────────────────────────────────────────────────── */
+
+.settings-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--settings-border);
+  border-radius: 9px;
+  color: var(--settings-text-muted);
+  background: rgba(var(--settings-ink), 0.025);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-feedback svg {
+  margin-top: 2px;
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.settings-feedback[data-tone="success"] {
+  border-left: 2px solid var(--settings-success);
+  color: var(--settings-text-muted);
+}
+
+.settings-feedback[data-tone="error"] {
+  border-color: var(--settings-border-strong);
+  border-left: 2px solid var(--settings-danger);
+  color: var(--settings-text);
+  font-weight: 560;
+}
+
+.settings-progress {
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(var(--settings-ink), 0.12);
+}
+
+.settings-progress__fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--settings-text);
+  transition: width 200ms ease;
+}
+
+@media (forced-colors: active) {
+  .settings-console {
+    --settings-canvas: Canvas;
+    --settings-panel: Canvas;
+    --settings-control: Canvas;
+    --settings-border: CanvasText;
+    --settings-border-strong: CanvasText;
+    --settings-text: CanvasText;
+    --settings-text-muted: CanvasText;
+    --settings-text-faint: GrayText;
+    --settings-selection-soft: Canvas;
+  }
+
+  .settings-category-nav__item.is-selected {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
+  }
+}

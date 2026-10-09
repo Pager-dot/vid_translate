@@ -1,0 +1,95 @@
+.overlay-control-button {
+  display: flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.38);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 10px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.overlay-control-button:hover:not(:disabled),
+.overlay-control-button[data-hovered="true"]:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}
+
+.overlay-control-button:active:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.overlay-control-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* An engaged mode reads as a filled control, not as a hover that got stuck. */
+.overlay-control-button[data-on="true"] {
+  border-color: rgba(122, 168, 255, 0.55);
+  background: rgba(122, 168, 255, 0.22);
+  color: #ffffff;
+}
+
+.overlay-control-button[data-tone="running"] {
+  border-color: rgba(255, 138, 128, 0.5);
+  color: #ffb3ab;
+}
+
+.overlay-control-button[data-tone="start"] {
+  border-color: rgba(154, 230, 110, 0.45);
+  color: #b9efa0;
+}
+
+.overlay-control-button[aria-busy="true"] {
+  cursor: progress;
+  opacity: 1;
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.overlay-control-button__busy {
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: overlay-control-busy 800ms linear infinite;
+}
+
+@keyframes overlay-control-busy {
+  to { transform: rotate(360deg); }
+}
+
+.motion-reduced .overlay-control-button__busy {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay-control-button__busy { animation: none; }
+}
+
+.overlay-control-button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+/* Text-labelled sibling of the icon control: same chrome, wider box. The
+   mode/LIVE/LOCAL toggles are words, not pictures, and a 24px square would
+   either clip them or shrink them below reading size. */
+.overlay-control-button--text {
+  width: auto;
+  min-width: 30px;
+  padding: 0 7px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}

@@ -2,6 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
+import { Icon } from "./ui/Icon";
+import { Select } from "./ui/Select";
+import { Switch } from "./ui/Switch";
+import { Tooltip } from "./ui/Tooltip";
+import { ControlButton } from "./ui/ControlButton";
+import { DragHandle } from "./ui/DragHandle";
+import { PulseRing, ACTIVITY_PHASES, activityPhase } from "./ui/PulseRing";
 import "./App.css";
 
 const FINAL_LINGER_MS = 2500;
@@ -11,6 +18,9 @@ const MAX_WORDS = 10;
 // as "the chunk just translated", not a growing multi-chunk run-on sentence.
 const MAX_PENDING_WORDS = 8;
 const SETTINGS_H = 640;
+// The settings console is a sidebar beside a pane of cards, so it wants a
+// document-shaped window rather than the full-display strip the overlay uses.
+const SETTINGS_W = 920;
 // Fixed compact window height while a setup card (model download / audio setup) is
 // showing — tall mode windows would otherwise leave a large invisible click-blocking
 // strip around the small centered card.
@@ -58,15 +68,39 @@ const DEFAULT_SETTINGS = {
 /// transcription quality: Japanese→English is the harder half of what the model is being
 /// asked to do here, and `tiny` in particular produces English that is fluent and wrong.
 const WHISPER_MODELS = [
-  { id: "tiny-q5_1",   label: "Tiny (quantized) — 31MB, fastest, rough translation" },
-  { id: "tiny",        label: "Tiny — 74MB, very fast, rough translation" },
-  { id: "base-q5_1",   label: "Base (quantized) — 57MB" },
-  { id: "base",        label: "Base — 141MB" },
-  { id: "small-q5_1",  label: "Small (quantized) — 181MB, best speed/accuracy trade" },
-  { id: "small",       label: "Small — 465MB, recommended on Apple Silicon" },
-  { id: "medium-q5_0", label: "Medium (quantized) — 514MB, slow on most CPUs" },
-  { id: "medium",      label: "Medium — 1.4GB, needs a fast machine" },
+  { id: "tiny-q5_1",   label: "Tiny (quantized)",  description: "31MB · fastest, rough translation" },
+  { id: "tiny",        label: "Tiny",              description: "74MB · very fast, rough translation" },
+  { id: "base-q5_1",   label: "Base (quantized)",  description: "57MB" },
+  { id: "base",        label: "Base",              description: "141MB" },
+  { id: "small-q5_1",  label: "Small (quantized)", description: "181MB · best speed/accuracy trade" },
+  { id: "small",       label: "Small",             description: "465MB · recommended on Apple Silicon" },
+  { id: "medium-q5_0", label: "Medium (quantized)", description: "514MB · slow on most CPUs" },
+  { id: "medium",      label: "Medium",            description: "1.4GB · needs a fast machine" },
 ];
+
+/// The font stacks offered for the caption surfaces.
+const FONT_OPTIONS = [
+  { value: "system-ui", label: "System UI" },
+  { value: "Georgia, serif", label: "Georgia" },
+  { value: "Arial, sans-serif", label: "Arial" },
+  { value: "'Courier New', monospace", label: "Courier New" },
+  { value: "'Times New Roman', serif", label: "Times New Roman" },
+];
+
+/// Sidebar categories for the settings console, in reading order.
+const SETTINGS_CATEGORIES = [
+  { id: "translation", label: "Translation", icon: "languages" },
+  { id: "speech",      label: "Speech",      icon: "waves" },
+  { id: "appearance",  label: "Appearance",  icon: "type" },
+  { id: "layout",      label: "Layout",      icon: "sliders" },
+];
+
+const CATEGORY_BLURB = {
+  translation: "Where translations come from, and which model does the work.",
+  speech: "How speech is recognised before it is translated.",
+  appearance: "How the caption overlay looks on screen.",
+  layout: "How much of the display the overlay takes up.",
+};
 
 function loadSettings() {
   try {
@@ -120,7 +154,33 @@ async function resizeKeepingBottom(win, width, height) {
   await win.setPosition(new LogicalPosition(newX, newY));
 }
 
+/** One label-and-description row with its control on the right. */
+function SettingsRow({ label, description, feedback, tight, children }) {
+  return (
+    <div className={tight ? "settings-row settings-row--tight" : "settings-row"}>
+      <div className="settings-row__copy">
+        <span className="settings-row__label">{label}</span>
+        {description && <span className="settings-row__description">{description}</span>}
+      </div>
+      <div className="settings-row__control">{children}</div>
+      {feedback && <div className="settings-row__feedback">{feedback}</div>}
+    </div>
+  );
+}
+
+function SettingsCard({ title, children }) {
+  return (
+    <section className="settings-card">
+      <div className="settings-card__header">
+        <h2>{title}</h2>
+      </div>
+      <div className="settings-card__body">{children}</div>
+    </section>
+  );
+}
+
 function SettingsPanel({ draft, setDraft, onSave, onClose, onReset }) {
+  const [category, setCategory]     = useState("translation");
   const [pullInput, setPullInput]   = useState("");
   const [pullStatus, setPullStatus] = useState("idle"); // idle | pulling | done | error
   const [pullProgress, setPullProgress] = useState(null);
@@ -163,186 +223,287 @@ function SettingsPanel({ draft, setDraft, onSave, onClose, onReset }) {
 
   const upd = (key, val) => setDraft((d) => ({ ...d, [key]: val }));
 
-  return (
-    <div className="settings-window">
-      <div className="settings-header" data-tauri-drag-region>
-        <span className="settings-title">Settings</span>
-        <button className="btn btn--close" onClick={onClose} title="Close settings">✕</button>
-      </div>
-
-      <div className="settings-form">
-        {/* ── Ollama Cloud ──────────────────────────── */}
-        <div className="settings-section">Ollama Cloud</div>
-
-        <div className="settings-row">
-          <label>API Key</label>
-          <input
-            type="password"
-            className="settings-input"
-            value={draft.ollamaKey}
-            onChange={(e) => upd("ollamaKey", e.target.value)}
-            placeholder="paste from ollama.com/settings/keys"
-          />
-        </div>
-        <div className="settings-hint">
-          With a key, requests go to ollama.com — no local install needed.
-        </div>
-
-        <div className="settings-row">
-          <label>Model</label>
-          <input
-            type="text"
-            className="settings-input"
-            value={draft.ollamaModel}
-            onChange={(e) => upd("ollamaModel", e.target.value)}
-          />
-        </div>
-
-        {/* ── Pull model (local) ────────────────────── */}
-        <div className="settings-section">Pull Model (local Ollama)</div>
-
-        <div className="settings-row">
-          <input
-            type="text"
-            className="settings-input"
-            value={pullInput}
-            onChange={(e) => setPullInput(e.target.value)}
-            placeholder={draft.ollamaModel || "gemma4:27b"}
-          />
-          <button
-            className="btn btn--pull"
-            onClick={handlePull}
-            disabled={pullStatus === "pulling"}
-          >
-            {pullStatus === "pulling" ? "…" : "Pull"}
-          </button>
-        </div>
-
-        {(pullProgress || pullMsg) && (
-          <div className="pull-status">
-            {pullProgress && (
-              <div className="pull-bar-track">
-                <div
-                  className="pull-bar-fill"
-                  style={{
-                    width: `${Math.round((pullProgress.completed / pullProgress.total) * 100)}%`,
-                  }}
-                />
-              </div>
-            )}
-            <span
-              className={
-                pullStatus === "done"
-                  ? "pull-msg pull-msg--done"
-                  : pullStatus === "error"
-                  ? "pull-msg pull-msg--error"
-                  : "pull-msg"
-              }
-            >
-              {pullMsg}
-            </span>
+  const pullFeedback = (pullProgress || pullMsg) && (
+    <div
+      className="settings-feedback"
+      data-tone={pullStatus === "done" ? "success" : pullStatus === "error" ? "error" : "info"}
+    >
+      <Icon
+        name={
+          pullStatus === "done" ? "checkmark"
+          : pullStatus === "error" ? "alert-triangle"
+          : "download"
+        }
+      />
+      <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
+        <span>{pullMsg}</span>
+        {pullProgress && (
+          <div className="settings-progress">
+            <div
+              className="settings-progress__fill"
+              style={{
+                width: `${Math.round((pullProgress.completed / pullProgress.total) * 100)}%`,
+              }}
+            />
           </div>
         )}
-
-        {/* ── Japanese recognition ──────────────────── */}
-        <div className="settings-section">Speech Recognition (Whisper)</div>
-
-        <div className="settings-row">
-          <label>Model</label>
-          <select
-            className="settings-input"
-            value={draft.whisperModel}
-            onChange={(e) => upd("whisperModel", e.target.value)}
-          >
-            {WHISPER_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>{m.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="settings-hint">
-          Used for Japanese and Spanish. Bigger is more accurate, smaller is faster. If captions lag further and
-          further behind the audio, this machine cannot keep up with the current size — drop
-          one. A size you have not used yet downloads the first time you press ▶.
-        </div>
-
-        {/* ── Appearance ───────────────────────────── */}
-        <div className="settings-section">Appearance</div>
-
-        <div className="settings-row">
-          <label>Font</label>
-          <select
-            className="settings-input"
-            value={draft.fontFamily}
-            onChange={(e) => upd("fontFamily", e.target.value)}
-          >
-            <option value="system-ui">System UI</option>
-            <option value="Georgia, serif">Georgia</option>
-            <option value="Arial, sans-serif">Arial</option>
-            <option value="'Courier New', monospace">Courier New</option>
-            <option value="'Times New Roman', serif">Times New Roman</option>
-          </select>
-        </div>
-
-        <div className="settings-row">
-          <label>Font Scale</label>
-          <input
-            type="range" min="0.5" max="2" step="0.1"
-            value={draft.fontScale}
-            onChange={(e) => upd("fontScale", parseFloat(e.target.value))}
-          />
-          <span className="settings-val">{draft.fontScale}×</span>
-        </div>
-
-        <div className="settings-row">
-          <label>Opacity</label>
-          <input
-            type="range" min="0.05" max="1" step="0.05"
-            value={draft.opacity}
-            onChange={(e) => upd("opacity", parseFloat(e.target.value))}
-          />
-          <span className="settings-val">{Math.round(draft.opacity * 100)}%</span>
-        </div>
-
-        {/* ── Dimensions ───────────────────────────── */}
-        <div className="settings-section">Dimensions</div>
-
-        <div className="settings-row">
-          <label>Width</label>
-          <input
-            type="number" className="settings-input settings-input--num"
-            value={draft.width ?? ""} min={300} max={7680}
-            placeholder="full"
-            onChange={(e) => upd("width", parseInt(e.target.value) || null)}
-          />
-          <span className="settings-unit">px (empty = full display)</span>
-        </div>
-
-        <div className="settings-row">
-          <label>EN Height</label>
-          <input
-            type="number" className="settings-input settings-input--num"
-            value={draft.enHeight} min={60} max={400}
-            onChange={(e) => upd("enHeight", parseInt(e.target.value) || draft.enHeight)}
-          />
-          <span className="settings-unit">px</span>
-        </div>
-
-        <div className="settings-row">
-          <label>JA/ES Height</label>
-          <input
-            type="number" className="settings-input settings-input--num"
-            value={draft.jaHeight} min={160} max={1200}
-            onChange={(e) => upd("jaHeight", parseInt(e.target.value) || draft.jaHeight)}
-          />
-          <span className="settings-unit">px</span>
-        </div>
       </div>
+    </div>
+  );
 
-      <div className="settings-footer">
-        <button className="btn btn--reset" onClick={onReset} title="Reset UI settings to defaults">
-          Reset
-        </button>
-        <button className="btn btn--save" onClick={onSave}>Save</button>
+  return (
+    <div className="settings-console">
+      <aside className="settings-sidebar">
+        <div className="settings-brand" data-tauri-drag-region>
+          <span className="settings-brand__name">VidTranslate</span>
+          <span className="settings-brand__label">Settings</span>
+        </div>
+        <nav className="settings-category-nav" aria-label="Settings categories">
+          {SETTINGS_CATEGORIES.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              aria-current={category === item.id ? "page" : undefined}
+              className={
+                category === item.id
+                  ? "settings-category-nav__item is-selected"
+                  : "settings-category-nav__item"
+              }
+              onClick={() => setCategory(item.id)}
+            >
+              <Icon name={item.icon} />
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="settings-sidebar-footer">
+          <button
+            type="button"
+            className="settings-sidebar-action"
+            onClick={onReset}
+            title="Reset UI settings to defaults"
+          >
+            <Icon name="reset" />
+            <span>Reset to defaults</span>
+          </button>
+        </div>
+      </aside>
+
+      <div className="settings-pane">
+        <header className="settings-pane__header" data-tauri-drag-region>
+          <div>
+            <h1>{SETTINGS_CATEGORIES.find((c) => c.id === category).label}</h1>
+            <p>{CATEGORY_BLURB[category]}</p>
+          </div>
+          <ControlButton icon="close" label="Close settings" onClick={onClose} />
+        </header>
+
+        <div className="settings-pane__scroll">
+          {category === "translation" && (
+            <div className="settings-category-panel">
+              <SettingsCard title="Ollama Cloud">
+                <SettingsRow
+                  label="API key"
+                  description="With a key, requests go to ollama.com — no local install needed."
+                >
+                  <input
+                    type="password"
+                    value={draft.ollamaKey}
+                    onChange={(e) => upd("ollamaKey", e.target.value)}
+                    placeholder="paste from ollama.com/settings/keys"
+                    aria-label="Ollama API key"
+                  />
+                </SettingsRow>
+                <SettingsRow label="Model" description="The model asked to translate each clause.">
+                  <input
+                    type="text"
+                    value={draft.ollamaModel}
+                    onChange={(e) => upd("ollamaModel", e.target.value)}
+                    aria-label="Ollama model"
+                  />
+                </SettingsRow>
+              </SettingsCard>
+
+              <SettingsCard title="Offline translation">
+                <SettingsRow
+                  label="Translate locally"
+                  description="Use a bundled offline model instead of Ollama. The first run downloads and loads it, which can take a while."
+                  tight
+                >
+                  <Switch
+                    checked={draft.useLocalTranslation}
+                    onChange={(checked) => upd("useLocalTranslation", checked)}
+                    aria-label="Translate locally"
+                  />
+                </SettingsRow>
+              </SettingsCard>
+
+              <SettingsCard title="Pull a model (local Ollama)">
+                <SettingsRow
+                  label="Model name"
+                  description="Downloads into the Ollama instance running on this machine."
+                  feedback={pullFeedback}
+                >
+                  <input
+                    type="text"
+                    value={pullInput}
+                    onChange={(e) => setPullInput(e.target.value)}
+                    placeholder={draft.ollamaModel || "gemma3:27b"}
+                    aria-label="Model to pull"
+                  />
+                  <button
+                    type="button"
+                    className="settings-button settings-button--quiet settings-button--compact"
+                    onClick={handlePull}
+                    disabled={pullStatus === "pulling"}
+                  >
+                    {pullStatus === "pulling" ? "Pulling…" : "Pull"}
+                  </button>
+                </SettingsRow>
+              </SettingsCard>
+            </div>
+          )}
+
+          {category === "speech" && (
+            <div className="settings-category-panel">
+              <SettingsCard title="Whisper">
+                <SettingsRow
+                  label="Model size"
+                  description="Used for Japanese and Spanish. Bigger is more accurate, smaller is faster. If captions lag further and further behind the audio, this machine cannot keep up with the current size — drop one. A size you have not used yet downloads the first time you press play."
+                >
+                  <Select
+                    label="Whisper model size"
+                    value={draft.whisperModel}
+                    options={WHISPER_MODELS.map((m) => ({
+                      value: m.id,
+                      label: m.label,
+                      description: m.description,
+                    }))}
+                    onChange={(value) => upd("whisperModel", value)}
+                  />
+                </SettingsRow>
+              </SettingsCard>
+
+              <SettingsCard title="Audio source">
+                <SettingsRow
+                  label="Capture the microphone"
+                  description="macOS only. Captions what the microphone hears instead of what your Mac is playing — useful when system-audio capture is unavailable."
+                  tight
+                >
+                  <Switch
+                    checked={draft.preferMicrophone}
+                    onChange={(checked) => upd("preferMicrophone", checked)}
+                    aria-label="Capture the microphone"
+                  />
+                </SettingsRow>
+              </SettingsCard>
+            </div>
+          )}
+
+          {category === "appearance" && (
+            <div className="settings-category-panel">
+              <SettingsCard title="Type">
+                <SettingsRow label="Font" description="The family the captions are set in.">
+                  <Select
+                    label="Caption font"
+                    value={draft.fontFamily}
+                    options={FONT_OPTIONS}
+                    onChange={(value) => upd("fontFamily", value)}
+                  />
+                </SettingsRow>
+                <SettingsRow label="Font size" description="Scales every caption surface at once.">
+                  <div className="settings-range">
+                    <input
+                      type="range" min="0.5" max="2" step="0.1"
+                      value={draft.fontScale}
+                      onChange={(e) => upd("fontScale", parseFloat(e.target.value))}
+                      aria-label="Font size"
+                    />
+                    <output>{draft.fontScale.toFixed(1)}×</output>
+                  </div>
+                </SettingsRow>
+              </SettingsCard>
+
+              <SettingsCard title="Background">
+                <SettingsRow
+                  label="Opacity"
+                  description="How much of what is behind the overlay shows through."
+                >
+                  <div className="settings-range">
+                    <input
+                      type="range" min="0.05" max="1" step="0.05"
+                      value={draft.opacity}
+                      onChange={(e) => upd("opacity", parseFloat(e.target.value))}
+                      aria-label="Background opacity"
+                    />
+                    <output>{Math.round(draft.opacity * 100)}%</output>
+                  </div>
+                </SettingsRow>
+              </SettingsCard>
+            </div>
+          )}
+
+          {category === "layout" && (
+            <div className="settings-category-panel">
+              <SettingsCard title="Dimensions">
+                <SettingsRow
+                  label="Width"
+                  description="Leave empty to span the whole display."
+                >
+                  <input
+                    type="number"
+                    value={draft.width ?? ""} min={300} max={7680}
+                    placeholder="full"
+                    onChange={(e) => upd("width", parseInt(e.target.value) || null)}
+                    aria-label="Overlay width"
+                  />
+                  <span className="settings-unit">px</span>
+                </SettingsRow>
+                <SettingsRow
+                  label="English height"
+                  description="The compact ticker used by English mode and by LIVE."
+                >
+                  <input
+                    type="number"
+                    value={draft.enHeight} min={60} max={400}
+                    onChange={(e) => upd("enHeight", parseInt(e.target.value) || draft.enHeight)}
+                    aria-label="English overlay height"
+                  />
+                  <span className="settings-unit">px</span>
+                </SettingsRow>
+                <SettingsRow
+                  label="Japanese / Spanish height"
+                  description="The taller canvas that shows translated history as well as the live line."
+                >
+                  <input
+                    type="number"
+                    value={draft.jaHeight} min={160} max={1200}
+                    onChange={(e) => upd("jaHeight", parseInt(e.target.value) || draft.jaHeight)}
+                    aria-label="Japanese and Spanish overlay height"
+                  />
+                  <span className="settings-unit">px</span>
+                </SettingsRow>
+              </SettingsCard>
+              <p className="settings-help">
+                Dragging the overlay's own edges also saves these, so the numbers here are
+                only needed for an exact size.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <footer className="settings-pane__footer">
+          <span className="settings-pane__footer-note">
+            Changes apply when you save.
+          </span>
+          <button type="button" className="settings-button settings-button--quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="settings-button settings-button--primary" onClick={onSave}>
+            <Icon name="checkmark" />
+            Save
+          </button>
+        </footer>
       </div>
     </div>
   );
@@ -411,13 +572,21 @@ export default function App() {
   // small lie that reads as the app being broken. Naming the actual state instead makes
   // the same wait feel intentional, which is most of the perceived-latency problem.
   const emptyStateLabel = () => {
-    if (!running) return "Press ▶ to start";
+    if (!running) return "Press play to start";
     if (status === "loading_model" || status === "loading") return "Loading model…";
     return "Listening…";
   };
 
   // Apply persisted CSS vars on mount
   useEffect(() => { applySettings(settings); }, []);
+
+  // The overlay is a floating transparent surface; the settings console is an
+  // opaque document. Swapping a body class rather than restyling in place keeps
+  // the window padding and background in one place (App.css).
+  useEffect(() => {
+    document.body.classList.toggle("settings-body", settingsOpen);
+    return () => document.body.classList.remove("settings-body");
+  }, [settingsOpen]);
 
   // Load the Whisper model while the user is still looking at the window, rather than
   // after they press Start. Fire-and-forget and idempotent on the Rust side.
@@ -706,6 +875,18 @@ export default function App() {
   };
   useEffect(() => { toggleRef.current = toggle; });
 
+  // Wipe what is on screen without stopping the session — the overlay's own
+  // "clear" control, as in Mimi. Incoming chunks simply start a fresh history.
+  const clearCaptions = () => {
+    setTranslationHistory([]);
+    clearPendingQueue();
+    setPendingEnglish("");
+    setPendingProvisional(false);
+    setJapaneseStream("");
+    setWords([]);
+    setCurrentJa("");
+  };
+
   const MODES = ["vosk", "vosk-ja", "vosk-es"];
   const toggleMode = () => {
     if (!running) {
@@ -726,7 +907,7 @@ export default function App() {
     setDraft({ ...settings });
     const win = getCurrentWindow();
     const screenH = window.screen.height;
-    const w = Math.min(1200, screenWidth());
+    const w = Math.min(SETTINGS_W, screenWidth());
     const h = Math.min(SETTINGS_H, screenH - 40);
     const y = Math.max(0, screenH - h - 20);
     expectedSizeRef.current = { width: w, height: h };
@@ -798,36 +979,44 @@ export default function App() {
     const denied = status === "audio_permission_denied";
 
     return (
-      <div className="setup-screen" data-tauri-drag-region>
+      <div className="overlay" data-tauri-drag-region>
+        <div className="overlay__band" data-tauri-drag-region>
+          <DragHandle label="Drag to move" />
+        </div>
         <div className="setup-card" data-tauri-drag-region>
-          <div className="setup-title" data-tauri-drag-region>
+          <PulseRing phase="error" compact motionEnabled={false} />
+          <div className="setup-card__title" data-tauri-drag-region>
             {denied ? "Not hearing any audio" : "System audio unavailable"}
           </div>
-          <p className="setup-msg" data-tauri-drag-region>
+          <p className="setup-card__message" data-tauri-drag-region>
             {denied
               ? "macOS needs permission to let VidTranslate hear what your Mac is playing. Allow it under Privacy & Security → Audio Recording, then try again."
               : "Capturing system audio needs macOS 14.4 or later. You can caption your microphone instead."}
           </p>
-          <div className="setup-actions">
+          <div className="setup-card__actions">
             {denied && (
               <button
-                className="btn btn--pill btn--pill-primary"
+                type="button"
+                className="overlay-button overlay-button--primary"
                 onClick={() => invoke("open_audio_privacy_settings")}
               >
                 Open Privacy Settings
               </button>
             )}
             <button
-              className={denied ? "btn btn--pill" : "btn btn--pill btn--pill-primary"}
+              type="button"
+              className={denied ? "overlay-button" : "overlay-button overlay-button--primary"}
               onClick={retry}
             >
               Try again
             </button>
             <button
-              className="btn btn--pill"
+              type="button"
+              className="overlay-button"
               onClick={useMicrophoneInstead}
               title="Caption your microphone instead of system audio"
             >
+              <Icon name="microphone" />
               Use microphone
             </button>
           </div>
@@ -864,16 +1053,25 @@ export default function App() {
         : invoke("download_vosk_model", { kind });
 
     return (
-      <div className="setup-screen" data-tauri-drag-region>
+      <div className="overlay" data-tauri-drag-region>
+        <div className="overlay__band" data-tauri-drag-region>
+          <DragHandle label="Drag to move" />
+        </div>
         <div className="setup-card" data-tauri-drag-region>
           {!dl && (
             <>
-              <div className="setup-title" data-tauri-drag-region>{label} model required</div>
-              <p className="setup-msg" data-tauri-drag-region>
+              <PulseRing phase="idle" compact motionEnabled={false} />
+              <div className="setup-card__title" data-tauri-drag-region>{label} model required</div>
+              <p className="setup-card__message" data-tauri-drag-region>
                 Downloads once, then everything runs offline.
               </p>
-              <div className="setup-actions">
-                <button className="btn btn--pill btn--pill-primary" onClick={startDownload}>
+              <div className="setup-card__actions">
+                <button
+                  type="button"
+                  className="overlay-button overlay-button--primary"
+                  onClick={startDownload}
+                >
+                  <Icon name="download" />
                   Download
                 </button>
               </div>
@@ -881,30 +1079,36 @@ export default function App() {
           )}
           {dl && dl.status !== "error" && (
             <>
-              <div className="setup-title" data-tauri-drag-region>
+              <PulseRing phase="connecting" compact motionEnabled />
+              <div className="setup-card__title" data-tauri-drag-region>
                 {dl.status === "downloading" ? `Downloading ${label} model…` : "Extracting…"}
               </div>
-              <div className="setup-progress-track">
+              <div className="setup-card__progress">
                 <div
                   className={
                     dl.status === "downloading" && pct !== null
-                      ? "setup-progress-fill"
-                      : "setup-progress-fill setup-progress-fill--indet"
+                      ? "setup-card__progress-fill"
+                      : "setup-card__progress-fill setup-card__progress-fill--indeterminate"
                   }
                   style={{ width: dl.status === "downloading" && pct !== null ? `${pct}%` : "100%" }}
                 />
               </div>
               {dl.status === "downloading" && pct !== null && (
-                <span className="setup-progress-pct" data-tauri-drag-region>{pct}%</span>
+                <span className="setup-card__percent" data-tauri-drag-region>{pct}%</span>
               )}
             </>
           )}
           {dl && dl.status === "error" && (
             <>
-              <div className="setup-title" data-tauri-drag-region>Download failed</div>
-              <p className="setup-msg" data-tauri-drag-region>{dl.error}</p>
-              <div className="setup-actions">
-                <button className="btn btn--pill btn--pill-primary" onClick={startDownload}>
+              <PulseRing phase="error" compact motionEnabled={false} />
+              <div className="setup-card__title" data-tauri-drag-region>Download failed</div>
+              <p className="setup-card__message" data-tauri-drag-region>{dl.error}</p>
+              <div className="setup-card__actions">
+                <button
+                  type="button"
+                  className="overlay-button overlay-button--primary"
+                  onClick={startDownload}
+                >
                   Retry
                 </button>
               </div>
@@ -926,130 +1130,105 @@ export default function App() {
       ? capPendingWords(translationHistory[translationHistory.length - 1])
       : "";
     const showPending = pendingEnglish && pendingEnglish !== latestHistoryLine;
+    const showSource = !liveOnly && japaneseStream;
+    const hasContent = translationHistory.length > 0 || showPending || showSource;
+    const phase = activityPhase(status, running);
+
     return (
-      <div className="bar bar--ja" data-tauri-drag-region>
-        <div className="bar-top" data-tauri-drag-region>
-          <div className="bar-left">
-            <button
-              className={running ? "btn btn--toggle btn--toggle-running" : "btn btn--toggle"}
-              onClick={toggle}
-              title={running ? "Stop" : "Start"}
-            >
-              {running ? "■" : "▶"}
-            </button>
-            <button
-              className="btn btn--mode btn--mode-active"
-              onClick={toggleMode}
-              disabled={running}
-              title={isEs ? "Switch to English mode" : "Switch to Spanish→English"}
-            >
-              {isEs ? "ES" : "JA"}
-            </button>
-            <button
-              className={liveOnly ? "btn btn--mode btn--live-active" : "btn btn--mode"}
-              onClick={() => setLiveOnly((v) => !v)}
-              title={liveOnly ? "Show full translation view" : "Show only live translated text"}
-            >
-              LIVE
-            </button>
-            <button
-              className={settings.useLocalTranslation ? "btn btn--mode btn--live-active" : "btn btn--mode"}
-              onClick={toggleLocalTranslation}
-              disabled={running}
-              title={
-                settings.useLocalTranslation
-                  ? "Using a local offline model (no Ollama) — first use downloads/loads it and may take a while"
-                  : "Using Ollama for translation"
-              }
-            >
-              LOCAL
-            </button>
-            <span className={`dot dot--${status}`} />
-          </div>
-          <div className="bar-actions">
-            <button className="btn btn--settings" onClick={openSettings} title="Settings">⚙</button>
-            <button className="btn btn--close" onClick={closeApp} title="Close">✕</button>
-          </div>
+      <div className="overlay" data-tauri-drag-region>
+        <div className="overlay__band" data-tauri-drag-region>
+          <DragHandle label="Drag to move" />
         </div>
 
-        <div
-          className={
-            translationHistory.length === 0 ? "ja-body ja-body--center" : "ja-body"
-          }
-          data-tauri-drag-region
-        >
-          {liveOnly ? (
-            translationHistory.length === 0 && !pendingEnglish ? (
-              <span
-                className={
-                  status === "loading_model" || status === "loading"
-                    ? "placeholder placeholder--working"
-                    : "placeholder"
-                }
-                data-tauri-drag-region
-              >
+        <div className="overlay__controls overlay__controls--left">
+          <ControlButton
+            icon={running ? "stop" : "play"}
+            tone={running ? "running" : "start"}
+            label={running ? "Stop captioning" : "Start captioning"}
+            onClick={toggle}
+          />
+          <ControlButton
+            text={isEs ? "ES" : "JA"}
+            on
+            label={isEs ? "Switch to English mode" : "Switch to Spanish → English"}
+            onClick={toggleMode}
+            disabled={running}
+          />
+          <ControlButton
+            text="LIVE"
+            on={liveOnly}
+            label={liveOnly ? "Show the full translation view" : "Show only the live translated line"}
+            onClick={() => setLiveOnly((v) => !v)}
+          />
+          <ControlButton
+            text="LOCAL"
+            on={settings.useLocalTranslation}
+            label={
+              settings.useLocalTranslation
+                ? "Translating with a local offline model — the first use downloads and loads it, which may take a while"
+                : "Translating with Ollama"
+            }
+            onClick={toggleLocalTranslation}
+            disabled={running}
+          />
+          <Tooltip label={ACTIVITY_PHASES[phase].label}>
+            {() => <PulseRing phase={phase} compact motionEnabled />}
+          </Tooltip>
+        </div>
+
+        <div className="overlay__controls overlay__controls--right">
+          <ControlButton
+            icon="eraser"
+            label="Clear captions"
+            onClick={clearCaptions}
+            disabled={!hasContent}
+          />
+          <ControlButton icon="gear" label="Settings" onClick={openSettings} />
+          <ControlButton icon="close" label="Close" onClick={closeApp} />
+        </div>
+
+        <div className="overlay__body">
+          {!hasContent ? (
+            <div className="overlay__empty" data-tauri-drag-region>
+              <PulseRing phase={phase} prominent compact={liveOnly} motionEnabled />
+              <div className="overlay__empty-text" data-tauri-drag-region>
                 {emptyStateLabel()}
-              </span>
-            ) : (
-              <>
-                <div className="ja-history" data-tauri-drag-region>
-                  {translationHistory.map((line, i) => {
-                    const isLatest = i === translationHistory.length - 1;
-                    return (
-                      <div
-                        key={i}
-                        data-tauri-drag-region
-                        className={isLatest ? "ja-history-item ja-history-item--latest" : "ja-history-item"}
-                      >
-                        {isEs ? capPendingWords(line) : line}
-                      </div>
-                    );
-                  })}
-                  <div ref={historyEndRef} />
-                </div>
-                {showPending && <div className={pendingProvisional ? "ja-pending ja-pending--provisional" : "ja-pending"} data-tauri-drag-region>{pendingEnglish}</div>}
-              </>
-            )
-          ) : translationHistory.length === 0 ? (
-            // nothing finalized yet — center the streaming text instead of
-            // pinning it under an empty history area
-            pendingEnglish || japaneseStream ? (
-              <>
-                {showPending && <div className={pendingProvisional ? "ja-pending ja-pending--provisional" : "ja-pending"} data-tauri-drag-region>{pendingEnglish}</div>}
-                {japaneseStream && <div className="ja-japanese" data-tauri-drag-region>{japaneseStream}</div>}
-              </>
-            ) : (
-              <span
-                className={
-                  status === "loading_model" || status === "loading"
-                    ? "placeholder placeholder--working"
-                    : "placeholder"
-                }
-                data-tauri-drag-region
-              >
-                {emptyStateLabel()}
-              </span>
-            )
-          ) : (
-            <>
-              <div className="ja-history" data-tauri-drag-region>
-                {translationHistory.map((line, i) => {
-                  const isLatest = i === translationHistory.length - 1;
-                  return (
-                    <div
-                      key={i}
-                      data-tauri-drag-region
-                      className={isLatest ? "ja-history-item ja-history-item--latest" : "ja-history-item"}
-                    >
-                      {isEs ? capPendingWords(line) : line}
-                    </div>
-                  );
-                })}
-                <div ref={historyEndRef} />
               </div>
-              {pendingEnglish && <div className={pendingProvisional ? "ja-pending ja-pending--provisional" : "ja-pending"} data-tauri-drag-region>{pendingEnglish}</div>}
-              {japaneseStream && <div className="ja-japanese" data-tauri-drag-region>{japaneseStream}</div>}
-            </>
+            </div>
+          ) : (
+            <div className="overlay-timeline" data-tauri-drag-region>
+              {translationHistory.map((line, i) => (
+                <div
+                  key={i}
+                  data-tauri-drag-region
+                  className={
+                    i === translationHistory.length - 1
+                      ? "subtitle-block subtitle-block--latest"
+                      : "subtitle-block"
+                  }
+                >
+                  {isEs ? capPendingWords(line) : line}
+                </div>
+              ))}
+              {showPending && (
+                <div
+                  data-tauri-drag-region
+                  className={
+                    pendingProvisional
+                      ? "subtitle-block subtitle-block--live subtitle-block--provisional"
+                      : "subtitle-block subtitle-block--live"
+                  }
+                >
+                  {pendingEnglish}
+                </div>
+              )}
+              {showSource && (
+                <div className="subtitle-block subtitle-block--source" data-tauri-drag-region>
+                  {japaneseStream}
+                </div>
+              )}
+              <div ref={historyEndRef} />
+            </div>
           )}
         </div>
       </div>
@@ -1057,42 +1236,43 @@ export default function App() {
   }
 
   // ── English mode ───────────────────────────────────────────────────────────
+  const phase = activityPhase(status, running);
   return (
-    <div className="bar" data-tauri-drag-region>
-      <div className="bar-left">
-        <button
-          className={running ? "btn btn--toggle btn--toggle-running" : "btn btn--toggle"}
+    <div className="overlay overlay--compact" data-tauri-drag-region>
+      <div className="overlay__row" data-tauri-drag-region>
+        <DragHandle label="Drag to move" />
+        <ControlButton
+          icon={running ? "stop" : "play"}
+          tone={running ? "running" : "start"}
+          label={running ? "Stop captioning" : "Start captioning"}
           onClick={toggle}
-          title={running ? "Stop" : "Start"}
-        >
-          {running ? "■" : "▶"}
-        </button>
-        <button
-          className="btn btn--mode"
+        />
+        <ControlButton
+          text="EN"
+          on
+          label="Switch to Japanese → English"
           onClick={toggleMode}
-          title="Switch to Japanese→English"
           disabled={running}
-        >
-          EN
-        </button>
-        <span className={`dot dot--${status}`} />
-      </div>
-      <div className="transcript" data-tauri-drag-region>
+        />
+        <Tooltip label={ACTIVITY_PHASES[phase].label}>
+          {() => <PulseRing phase={phase} compact motionEnabled />}
+        </Tooltip>
+
         {words.length === 0 && !currentJa ? (
-          <span className="placeholder">
-            {running ? "Listening…" : "Press ▶ to start"}
+          <span className="overlay__phase overlay__phase--fill" data-tauri-drag-region>
+            {running ? "Listening…" : "Press play to start"}
           </span>
         ) : (
-          <span className="caption">
+          <span className="overlay__ticker" data-tauri-drag-region>
             {words.map((word, i) => {
               const isEnLive = !currentJa && isPartial && i === words.length - 1;
               return (
                 <span
                   key={i}
                   className={
-                    isEnLive ? "word word--current"
-                    : isPartial ? "word word--spoken"
-                    : "word word--final"
+                    isEnLive ? "overlay__word--current"
+                    : isPartial ? "overlay__word--spoken"
+                    : "overlay__word--final"
                   }
                 >
                   {word}
@@ -1100,13 +1280,12 @@ export default function App() {
                 </span>
               );
             })}
-            {currentJa && <span className="word word--current-ja">{currentJa}</span>}
+            {currentJa && <span className="overlay__word--source">{currentJa}</span>}
           </span>
         )}
-      </div>
-      <div className="bar-actions">
-        <button className="btn btn--settings" onClick={openSettings} title="Settings">⚙</button>
-        <button className="btn btn--close" onClick={closeApp} title="Close">✕</button>
+
+        <ControlButton icon="gear" label="Settings" onClick={openSettings} />
+        <ControlButton icon="close" label="Close" onClick={closeApp} />
       </div>
     </div>
   );
