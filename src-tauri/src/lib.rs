@@ -74,27 +74,68 @@ fn vosk_ja_model_path() -> std::path::PathBuf {
 /// the speech outright (BLEU 5.03 vs 14.15 end-to-end — see docs/ja-diagnosis.md). One
 /// ggml file rather than a directory, unlike the Vosk models.
 ///
-/// `small` and not `medium`/`large`: it already won decisively, it runs ~6x realtime on
-/// Apple Silicon, and it is 487MB against the 48MB Vosk model it replaces — which is
-/// already uncomfortable for the download story.
-pub const WHISPER_JA_MODEL_FILE: &str = "ggml-small.bin";
+/// Which size is a *user* choice, not a constant, because the right answer depends on the
+/// machine. `small` runs ~6x realtime on an M3 and is the accuracy the Japanese numbers in
+/// docs/ were measured at; on a slower x86 laptop a pass can overrun `STEP_MS`, at which
+/// point the recognizer falls permanently behind the audio and latency grows without bound
+/// (see `recognizer::whisper`). Dropping a size, or using the same size quantized, is the
+/// only lever that moves inference cost materially — the decode is already greedy,
+/// single-candidate, and threaded.
+///
+/// Ordered cheapest first; this is the order the picker shows.
+pub const WHISPER_MODELS: &[(&str, &str)] = &[
+    ("tiny-q5_1", "ggml-tiny-q5_1.bin"),
+    ("tiny", "ggml-tiny.bin"),
+    ("base-q5_1", "ggml-base-q5_1.bin"),
+    ("base", "ggml-base.bin"),
+    ("small-q5_1", "ggml-small-q5_1.bin"),
+    ("small", "ggml-small.bin"),
+    ("medium-q5_0", "ggml-medium-q5_0.bin"),
+    ("medium", "ggml-medium.bin"),
+];
+
+/// What a machine that has not said otherwise gets: the size everything was tuned and
+/// measured against.
+pub const WHISPER_DEFAULT_MODEL: &str = "small";
+
+pub const WHISPER_MODEL_REPO: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
+
 /// Silero weights for the speech gate. ~865KB, and the thing that stops prominent
-/// background music being captioned as "thank you for watching".
+/// background music being captioned as "thank you for watching". Shared by every size.
 pub const WHISPER_VAD_MODEL_URL: &str =
     "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin";
-pub const WHISPER_JA_MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
 
-fn whisper_ja_model_path() -> std::path::PathBuf {
-    if let Some(dir) = std::env::var_os("VID_TRANSLATE_WHISPER_MODEL") {
-        // Lets a different size be A/B'd without touching the download story, the same way
-        // VID_TRANSLATE_JA_MODEL_DIR works for the translation model.
-        return std::path::PathBuf::from(dir);
-    }
+/// The ggml filename for a picker id, falling back to the default rather than erroring: an
+/// id the frontend sends that this build does not know about is a version skew, and
+/// captions at the default size beat no captions.
+fn whisper_model_file(id: &str) -> &'static str {
+    WHISPER_MODELS
+        .iter()
+        .find(|(k, _)| *k == id)
+        .or_else(|| WHISPER_MODELS.iter().find(|(k, _)| *k == WHISPER_DEFAULT_MODEL))
+        .map(|(_, f)| *f)
+        .unwrap_or("ggml-small.bin")
+}
+
+fn whisper_model_id(id: Option<String>) -> String {
+    id.filter(|s| !s.is_empty()).unwrap_or_else(|| WHISPER_DEFAULT_MODEL.to_string())
+}
+
+/// Where the models live. Sizes sit side by side, so switching back to one already fetched
+/// costs no download.
+fn whisper_dir() -> std::path::PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("vid_translate")
-        .join(WHISPER_JA_MODEL_FILE)
+}
+
+fn whisper_ja_model_path(id: &str) -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("VID_TRANSLATE_WHISPER_MODEL") {
+        // Still wins over the setting: it points at an arbitrary ggml file, which is how a
+        // size outside the list above gets A/B'd without a build.
+        return std::path::PathBuf::from(path);
+    }
+    whisper_dir().join(whisper_model_file(id))
 }
 
 fn vosk_es_model_path() -> std::path::PathBuf {
@@ -431,8 +472,8 @@ fn local_model_exists(lang: String) -> bool {
 }
 
 #[tauri::command]
-fn whisper_model_exists() -> bool {
-    whisper_files().iter().all(|(_, p)| p.exists())
+fn whisper_model_exists(model: Option<String>) -> bool {
+    whisper_files(&whisper_model_id(model)).iter().all(|(_, p)| p.exists())
 }
 
 /// Loads the Whisper model into memory ahead of time, off the UI thread.
@@ -444,9 +485,10 @@ fn whisper_model_exists() -> bool {
 ///
 /// Safe to call repeatedly; after the first call it returns immediately.
 #[tauri::command]
-fn warm_whisper_model() {
-    std::thread::spawn(|| {
-        let path = whisper_ja_model_path();
+fn warm_whisper_model(model: Option<String>) {
+    let id = whisper_model_id(model);
+    std::thread::spawn(move || {
+        let path = whisper_ja_model_path(&id);
         if !path.exists() {
             return;
         }
@@ -460,22 +502,25 @@ fn warm_whisper_model() {
 
 /// The files the Japanese recognizer needs: the model itself, and the Silero weights for
 /// the speech gate that stops Whisper captioning background music.
-fn whisper_files() -> Vec<(&'static str, std::path::PathBuf)> {
-    let dir = whisper_ja_model_path()
+fn whisper_files(id: &str) -> Vec<(String, std::path::PathBuf)> {
+    let model = whisper_ja_model_path(id);
+    let dir = model
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     vec![
-        (WHISPER_JA_MODEL_URL, whisper_ja_model_path()),
-        (WHISPER_VAD_MODEL_URL, dir.join(recognizer::whisper::VAD_MODEL_FILE)),
+        (format!("{WHISPER_MODEL_REPO}{}", whisper_model_file(id)), model),
+        (WHISPER_VAD_MODEL_URL.to_string(), dir.join(recognizer::whisper::VAD_MODEL_FILE)),
     ]
 }
 
-/// Downloads the Whisper model and the VAD weights. No archives to unpack, but 487MB plus
-/// ~865KB across two files, so the progress events are reported against their combined
-/// total rather than resetting per file.
+/// Downloads the chosen Whisper model and the VAD weights. No archives to unpack, but two
+/// files of very different sizes (32MB to 1.5GB for the model, ~865KB for the weights), so
+/// the progress events are reported against their combined total rather than resetting per
+/// file.
 #[tauri::command]
-fn download_whisper_model(app: tauri::AppHandle) {
+fn download_whisper_model(app: tauri::AppHandle, model: Option<String>) {
+    let id = whisper_model_id(model);
     std::thread::spawn(move || {
         let emit = |status: &str, downloaded: Option<u64>, total: Option<u64>, error: Option<String>| {
             let _ = app.emit(
@@ -490,7 +535,7 @@ fn download_whisper_model(app: tauri::AppHandle) {
             );
         };
 
-        let wanted: Vec<_> = whisper_files().into_iter().filter(|(_, p)| !p.exists()).collect();
+        let wanted: Vec<_> = whisper_files(&id).into_iter().filter(|(_, p)| !p.exists()).collect();
         if wanted.is_empty() {
             emit("done", None, None, None);
             return;
@@ -669,6 +714,7 @@ fn start_listening(
     ollama_model: Option<String>,
     use_local_translation: Option<bool>,
     prefer_microphone: Option<bool>,
+    whisper_model: Option<String>,
 ) {
     // macOS only (a no-op elsewhere): set before the preflight below, since opting into
     // microphone capture is precisely what makes an unavailable system-audio tap acceptable.
@@ -687,6 +733,7 @@ fn start_listening(
     let app_handle = app.clone();
     let mode = mode.unwrap_or_else(|| "vosk".into());
     let use_local = use_local_translation.unwrap_or(false);
+    let whisper_model = whisper_model_id(whisper_model);
 
     let handle = std::thread::spawn(move || {
         // Refuse up front what is knowable up front (on macOS, the OS version), so an
@@ -699,7 +746,14 @@ fn start_listening(
             return;
         }
         match mode.as_str() {
-            "vosk-ja" => run_vosk_ja_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
+            "vosk-ja" => run_vosk_ja_pipeline(
+                app_handle,
+                stop_flag,
+                ollama_key,
+                ollama_model,
+                use_local,
+                whisper_model,
+            ),
             "vosk-es" => run_vosk_es_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
             _ => run_vosk_pipeline(app_handle, stop_flag),
         }
@@ -724,6 +778,7 @@ fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
     let result = recognizer::run(
         recognizer::Backend::Vosk,
         vosk_path.to_str().unwrap_or(""),
+        recognizer::Pacing::Live,
         rx,
         move || {
             let _ = app_for_ready.emit("status", StatusEvent { state: "listening".into() });
@@ -997,6 +1052,7 @@ fn run_translated_pipeline(
     let result = recognizer::run(
         backend,
         model_path.to_str().unwrap_or(""),
+        recognizer::Pacing::Live,
         rx,
         move || {
             let _ = app_for_ready.emit("status", StatusEvent { state: "listening".into() });
@@ -1152,11 +1208,12 @@ fn run_vosk_ja_pipeline(
     ollama_key: Option<String>,
     ollama_model: Option<String>,
     use_local: bool,
+    whisper_model: String,
 ) {
     // Japanese recognises with Whisper, not Vosk. Vosk remains the recognizer for Spanish
     // and English, where it performs acceptably and its sub-second streaming is worth more
     // than the accuracy difference.
-    let ja_path = whisper_ja_model_path();
+    let ja_path = whisper_ja_model_path(&whisper_model);
     if !ja_path.exists() {
         let _ = app_handle.emit("status", StatusEvent { state: "whisper_ja_model_missing".into() });
         return;

@@ -278,7 +278,10 @@ mod realtime {
                 // calls the recognizer has heard n * 250ms of audio. Derived from the call
                 // count rather than the feeder's atomic, which races with it.
                 let mut blocks = 0u64;
-                recognizer::run(backend, model_path, rx_audio, || {}, |ev| {
+                // Paced at one 250ms block per 250ms, so this is a live capture in every
+                // way that matters — including that falling behind here is real lateness
+                // and the recognizer should drop audio exactly as it would in the app.
+                recognizer::run(backend, model_path, recognizer::Pacing::Live, rx_audio, || {}, |ev| {
                     blocks += 1;
                     // Everything in this block had finished being spoken by here.
                     let pos = blocks * 250;
@@ -410,7 +413,11 @@ fn run_clip(
     // to a ja→en model produces nonsense, and the harness would report it as a score.
     let native_en = backend.emits_english();
 
-    recognizer::run(backend, model_path, rx, || {}, |ev| match ev {
+    // Offline: the clip was pushed in up front, and every sample must be transcribed
+    // however long that takes. Telling the recognizer it is live here makes it discard the
+    // backlog it is *supposed* to chew through, which silently destroys the score — it read
+    // BLEU 0.00 on an 11.8-minute clip before this argument existed.
+    recognizer::run(backend, model_path, recognizer::Pacing::Offline, rx, || {}, |ev| match ev {
         RecognitionResult::Partial(text) => {
             if native_en {
                 return;

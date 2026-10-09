@@ -2,7 +2,7 @@
 //!
 //! Whisper transcribes a *finished* window of audio; it has no notion of a growing partial.
 //! This module manufactures the streaming contract the rest of the pipeline expects by
-//! holding a window of recent audio, re-transcribing all of it every `STEP_MS`, and
+//! holding a window of recent audio, re-transcribing all of it every step, and
 //! deciding which of the segments that come back are finished:
 //!
 //! * a segment with enough audio after it has stopped changing — the speaker moved on — so
@@ -10,11 +10,24 @@
 //! * whatever is left is emitted as `Partial`, and will be re-transcribed (and possibly
 //!   revised) on the next pass.
 //!
-//! Re-transcribing the window is not as wasteful as it sounds: Whisper's encoder always runs
-//! on a zero-padded 30-second window whatever you feed it, so a pass over 3 seconds of audio
+//! Re-transcribing the window is not as wasteful as it sounds: Whisper's encoder runs on a
+//! zero-padded 30-second window whatever you feed it, so a pass over 3 seconds of audio
 //! costs about the same as a pass over 15 (measured: ~400ms encode either way). The cost is
 //! therefore per *pass*, not per second of audio, which is why the step size sets both the
 //! latency and the CPU load and why there is nothing to gain from a smaller window.
+//!
+//! `audio_ctx` claws back part of that padding cost — see `audio_ctx_for` — but the shape of
+//! the problem is unchanged: cost per pass.
+//!
+//! ## Keeping up is not optional
+//!
+//! A pass must finish inside the step, or the audio queued behind it grows and the captions
+//! describe steadily older audio — fluent, plausible, and further out of sync every minute,
+//! with no mechanism that ever recovers. Two things hold the line, and both matter more than
+//! raw speed: the step is measured from real pass durations rather than fixed, and a backlog
+//! past `BACKLOG_STEPS` is *discarded* instead of transcribed late. On a machine too slow
+//! for the chosen model the result is captions with holes rather than captions that lag,
+//! which is the right failure: a late caption is read against the wrong picture.
 //!
 //! ## `set_no_context(true)` is not optional
 //!
@@ -33,13 +46,45 @@ use whisper_rs::{
     WhisperVadContextParams, WhisperVadParams,
 };
 
-use super::RecognitionResult;
+use super::{Pacing, RecognitionResult};
 
-/// How much new audio to accumulate between passes. This is the dominant term in
-/// user-visible latency: a word spoken just after a pass waits almost a full step before
-/// the next one sees it. 2s against ~0.5s of inference also keeps the duty cycle near 25%
-/// of one core, which leaves room for the translator threads.
-const STEP_MS: usize = 2000;
+/// How much new audio to accumulate between passes, as a range rather than a constant.
+///
+/// The step is the dominant term in user-visible latency: a word spoken just after a pass
+/// waits almost a full step before the next one sees it. It is also what sets the CPU duty
+/// cycle, and those pull in opposite directions — which is why a single number cannot be
+/// right for both an M3 (a pass costs ~0.4s, so a 2s step wastes 1.6s of latency doing
+/// nothing) and a slower x86 laptop (a pass costs more than 2s, so a 2s step asks for more
+/// passes per second than the machine can run).
+///
+/// So it is measured instead: the step tracks recent cycle durations (see `STEP_HEADROOM`),
+/// clamped to this range.
+///
+/// **The floor is 2s, which is where this started, so the step only ever stretches.** A
+/// machine fast enough for 2s steps was never the problem, and tightening below that is a
+/// different change with its own costs — double the passes means double the duty cycle and
+/// twice as many chances to revise a partial line under the reader, on battery. Apple
+/// Silicon therefore keeps exactly the cadence it was tuned and measured with, and only a
+/// machine that cannot hold 2s sees any of this move.
+const STEP_MIN_MS: usize = 2000;
+const STEP_MAX_MS: usize = 4000;
+
+/// Step as a multiple of the recent mean pass. The margin above 1.0 is what keeps the
+/// recognizer from spending every available cycle on inference: at 1.25 the decode occupies
+/// ~80% of one core's worth of work per step, leaving the rest for the VAD, the translator
+/// threads and the UI.
+const STEP_HEADROOM: f32 = 1.25;
+
+/// Where the step starts before any cycle has been timed — the same as the floor, so until
+/// a machine proves it is too slow nothing about its behaviour differs from before.
+const STEP_START_MS: usize = STEP_MIN_MS;
+
+/// Un-transcribed audio that means the recognizer has fallen behind for real, as a multiple
+/// of the current step. Below this, a slow pass is absorbed by the next one being skipped;
+/// above it, the audio is arriving faster than it can be decoded and the backlog will grow
+/// without bound unless something is thrown away.
+const BACKLOG_STEPS: usize = 2;
+
 
 /// Whisper needs roughly a second of audio to say anything useful; below this a pass is
 /// wasted work that tends to return nothing or a hallucinated fragment.
@@ -177,6 +222,42 @@ fn remember_tail(tail: &mut String, emitted: &str) {
 /// pipeline. `MarianState` already caches the translation models across toggles for exactly
 /// this reason; the recognizer had no equivalent because the Vosk model it replaced was
 /// 48MB and the cost did not show.
+/// Encoder context tokens for 30s of audio — the full mel window, and the value Whisper
+/// uses if told nothing.
+const AUDIO_CTX_FULL: i32 = 1500;
+
+/// Encoder tokens to allow for a window of `samples`.
+///
+/// This is the one place the "a pass over 3s costs the same as a pass over 15s" property in
+/// the module docs can be attacked rather than worked around. That property is not a law of
+/// nature: it is Whisper zero-padding every input to 30 seconds and then running its
+/// encoder over all of it, padding included. `audio_ctx` caps how much of that mel window
+/// the encoder actually walks, so a 6-second window can be encoded as 6 seconds of work
+/// instead of 30.
+///
+/// Scaled with a deliberate margin above the true length: the conv front-end needs context
+/// past the audio it is describing, and cutting too close truncates the last word or sends
+/// the decoder looking for text in padding it cannot see. `clamp` to `AUDIO_CTX_FULL` means
+/// a full-length window is simply the old behaviour.
+fn audio_ctx_for(samples: usize) -> i32 {
+    // An escape hatch, and the knob the A/B above was measured with:
+    // VID_TRANSLATE_WHISPER_FULL_AUDIO_CTX=1 restores the full mel window, so a quality
+    // regression blamed on this can be confirmed or cleared in one run rather than argued
+    // about.
+    static FULL: OnceLock<bool> = OnceLock::new();
+    if *FULL.get_or_init(|| {
+        std::env::var("VID_TRANSLATE_WHISPER_FULL_AUDIO_CTX").is_ok_and(|v| v == "1")
+    }) {
+        return AUDIO_CTX_FULL;
+    }
+    let secs = samples as f32 / SAMPLE_RATE as f32;
+    // 1500 tokens per 30s, plus 2s of headroom, rounded up to a multiple of 32 — whisper's
+    // encoder works in blocks and an awkward value buys nothing.
+    let tokens = ((secs + 2.0) * (AUDIO_CTX_FULL as f32 / 30.0)).ceil() as i32;
+    let tokens = (tokens + 31) / 32 * 32;
+    tokens.clamp(320, AUDIO_CTX_FULL)
+}
+
 static LOADED: OnceLock<Mutex<HashMap<String, Arc<WhisperContext>>>> = OnceLock::new();
 
 /// Returns the model for `path`, loading it only the first time.
@@ -192,6 +273,10 @@ pub fn preload(path: &str) -> Result<Arc<WhisperContext>, String> {
     if let Some(ctx) = guard.get(path) {
         return Ok(ctx.clone());
     }
+    // One model at a time. The user can switch size between sessions, and keeping the old
+    // one cached would hold its weights — up to 1.5GB — for a path nothing will ask for
+    // again.
+    guard.clear();
     let load_start = std::time::Instant::now();
     let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
         .map_err(|e| format!("failed to load Whisper model at {path}: {e}"))?;
@@ -225,6 +310,7 @@ pub fn run<F>(
     model_path: &str,
     lang: &'static str,
     translate: bool,
+    pacing: Pacing,
     rx: Receiver<Vec<i16>>,
     on_ready: impl FnOnce(),
     mut on_result: F,
@@ -279,15 +365,77 @@ where
     let mut window: Vec<f32> = Vec::with_capacity(ms_to_samples(MAX_WINDOW_MS));
     let mut since_pass = 0usize;
     let mut passes = 0u32;
-    // Pass durations, to check the one invariant that matters: a pass must finish inside
-    // STEP_MS. If it does not, the recognizer falls behind the audio permanently and
+    // Cycle durations — speech gate plus inference, i.e. everything a step must pay for.
+    // This checks the one invariant that matters: a cycle must finish inside the step. If it
+    // does not, the recognizer falls behind the audio and, without the catch-up below,
     // latency grows without bound rather than settling.
     let mut pass_ms_all: Vec<u128> = Vec::new();
+    // The current step, and the mean pass it is derived from. Both move; see STEP_MIN_MS.
+    let mut step_ms = STEP_START_MS;
+    let mut pass_ema_ms = 0f32;
+    // Audio thrown away to catch up, and how many times. Reported at the end, because a
+    // session that dropped audio produced captions with holes in them and the log should
+    // say so rather than leaving it to be guessed from the transcript.
+    let mut dropped_ms = 0usize;
+    let mut catch_ups = 0u32;
+    let mut overruns = 0u32;
+    // Audio pulled from the channel, against wall-clock time, to measure how far behind
+    // live the recognizer is running. See the catch-up block in the loop.
+    let mut consumed_samples = 0usize;
+    let mut clock: Option<std::time::Instant> = None;
     let mut last_partial = String::new();
     // Tail of what has already been emitted as `Final`, for overlap stripping.
     let mut committed_tail = String::new();
 
-    for chunk in rx {
+    for chunk in rx.iter() {
+        let clock = *clock.get_or_insert_with(std::time::Instant::now);
+        consumed_samples += chunk.len();
+
+        // How far behind the audio this recognizer is running.
+        //
+        // The channel from the capture thread is unbounded, and that is the hazard this
+        // block exists to handle. A live capture pushes one second of audio per second, so
+        // if a cycle costs more than the audio it covers, blocks queue up and the
+        // recognizer keeps transcribing audio from ever further in the past: captions stay
+        // fluent and drift steadily out of sync, and nothing ever recovers, not even in
+        // silence, because nothing shrinks the queue.
+        //
+        // Audio consumed against the wall clock measures exactly that. Note what it does
+        // *not* measure: whether the producer is live. A decoder slower than real time
+        // falls behind the clock whether it is fed by a microphone or by a file, which is
+        // why the answer comes from `pacing` and not from this number. See `Pacing`.
+        let consumed_ms = (consumed_samples * 1000 / SAMPLE_RATE) as i64;
+        let lag_ms = clock.elapsed().as_millis() as i64 - consumed_ms;
+
+        // Past a couple of steps the backlog is growing rather than fluctuating, and the
+        // only way back to live is to give up on some audio: a caption twenty seconds late
+        // is worse than a missing one, because the viewer reads it against the wrong
+        // picture.
+        if pacing == Pacing::Live && lag_ms > (step_ms * BACKLOG_STEPS) as i64 {
+            // Fast-forward: take everything queued and keep only the newest block. Dropping
+            // the *oldest* audio is what makes this a catch-up rather than a stutter.
+            let mut newest = chunk;
+            let mut skipped = 0usize;
+            while let Ok(next) = rx.try_recv() {
+                skipped += newest.len();
+                newest = next;
+            }
+            consumed_samples += skipped;
+            dropped_ms += skipped * 1000 / SAMPLE_RATE;
+            catch_ups += 1;
+            // The window holds audio from before the gap. Keeping it would splice speech
+            // across a hole and invite a confabulated bridge between the two halves.
+            window.clear();
+            since_pass = 0;
+            last_partial.clear();
+            // `committed_tail` deliberately stays: it is what the viewer has already read,
+            // and overlap stripping across a gap is harmless, where clearing it would let a
+            // repeat through at exactly the moment the transcript is already damaged.
+            window.extend(newest.iter().map(|s| *s as f32 / 32768.0));
+            since_pass += newest.len();
+            continue;
+        }
+
         window.extend(chunk.iter().map(|s| *s as f32 / 32768.0));
         since_pass += chunk.len();
 
@@ -298,12 +446,19 @@ where
         let step_samples = if passes == 0 {
             ms_to_samples(MIN_INFER_MS)
         } else {
-            ms_to_samples(STEP_MS)
+            ms_to_samples(step_ms)
         };
         if since_pass < step_samples || window.len() < ms_to_samples(MIN_INFER_MS) {
             continue;
         }
         since_pass = 0;
+
+        // Everything from here to the end of inference is what one step has to pay for, so
+        // it is all timed. The gate is not free and its cost grows with the window — it
+        // re-scans the whole thing each pass — so timing inference alone (which is what
+        // this used to do) under-reports the real duty cycle by 10-15% and tunes the step
+        // too tight.
+        let cycle_start = std::time::Instant::now();
 
         // The gate: is any of this speech? If not, discard the window instead of handing
         // music to Whisper and letting it invent a sentence.
@@ -350,26 +505,55 @@ where
         params.set_no_speech_thold(0.6);
         params.set_logprob_thold(-1.0);
         params.set_n_threads(threads);
+        // Encode the audio that is there, not the 30s of padding around it.
+        params.set_audio_ctx(audio_ctx_for(window.len()));
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
 
-        let pass_start = std::time::Instant::now();
         if let Err(e) = state.full(params, &window) {
             eprintln!("[whisper] inference failed: {e}");
             continue;
         }
         passes += 1;
-        let pass_ms = pass_start.elapsed().as_millis();
+        let pass_ms = cycle_start.elapsed().as_millis();
         pass_ms_all.push(pass_ms);
-        // The first pass pays for GPU pipeline setup on top of inference, so it is reported
+        if pass_ms > step_ms as u128 {
+            overruns += 1;
+        }
+
+        // Retune the step. An EMA rather than the last pass alone: pass cost varies with
+        // how much speech is in the window, and chasing each sample would make the step —
+        // and so the caption cadence — visibly jittery. The first pass is excluded because
+        // it also pays for pipeline setup, which never recurs.
+        if passes == 1 {
+            pass_ema_ms = pass_ms as f32;
+        } else {
+            pass_ema_ms = 0.7 * pass_ema_ms + 0.3 * pass_ms as f32;
+        }
+        let tuned = (pass_ema_ms * STEP_HEADROOM) as usize;
+        let tuned = tuned.clamp(STEP_MIN_MS, STEP_MAX_MS);
+        if tuned != step_ms && (tuned.abs_diff(step_ms) > 150 || passes < 4) {
+            if passes > 2 {
+                eprintln!("[whisper] step {step_ms}ms → {tuned}ms (mean pass {:.0}ms)", pass_ema_ms);
+            }
+            step_ms = tuned;
+        }
+
+        // The first pass pays for pipeline setup on top of inference, so it is reported
         // separately rather than being averaged into the steady-state figure.
-        if passes <= 2 || pass_ms > 2 * STEP_MS as u128 {
+        if passes <= 2 || pass_ms > 2 * step_ms as u128 {
             eprintln!(
-                "[whisper] pass {passes}: {pass_ms}ms over {:.1}s of audio{}",
+                "[whisper] pass {passes}: {pass_ms}ms (gate+decode) over {:.1}s of audio \
+                 (audio_ctx {}){}",
                 window.len() as f32 / SAMPLE_RATE as f32,
-                if pass_ms > STEP_MS as u128 { "  (slower than the step — falling behind)" } else { "" }
+                audio_ctx_for(window.len()),
+                if pass_ms > step_ms as u128 {
+                    "  (slower than the step — dropping audio to stay live)"
+                } else {
+                    ""
+                }
             );
         }
 
@@ -466,15 +650,24 @@ where
     if !pass_ms_all.is_empty() {
         let mut sorted = pass_ms_all.clone();
         sorted.sort_unstable();
-        let over = pass_ms_all.iter().filter(|m| **m > STEP_MS as u128).count();
         eprintln!(
-            "[whisper] {} passes: mean {}ms, p95 {}ms, max {}ms; {over} exceeded the {}ms step",
+            "[whisper] {} passes: mean {}ms, p95 {}ms, max {}ms; {overruns} exceeded the step \
+             (final step {step_ms}ms)",
             pass_ms_all.len(),
             pass_ms_all.iter().sum::<u128>() / pass_ms_all.len() as u128,
             sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)],
             sorted[sorted.len() - 1],
-            STEP_MS,
         );
+        if catch_ups > 0 {
+            // Worth saying plainly: this machine could not keep up, and the transcript has
+            // holes in it where the audio was dropped to stay in sync. A smaller model is
+            // the fix.
+            eprintln!(
+                "[whisper] fell behind {catch_ups}x — dropped {:.1}s of audio to stay live; \
+                 try a smaller model",
+                dropped_ms as f32 / 1000.0
+            );
+        }
     }
 
     // Capture stopped. Anything still in the window was really said, so flush it.
@@ -485,6 +678,7 @@ where
         params.set_translate(translate);
         params.set_no_context(true);
         params.set_n_threads(threads);
+        params.set_audio_ctx(audio_ctx_for(window.len()));
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -519,6 +713,96 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_ctx_scales_with_the_window_and_never_exceeds_the_mel_window() {
+        // A full-length window must ask for the whole thing, or this optimisation would be
+        // silently truncating audio Whisper was given.
+        assert_eq!(audio_ctx_for(ms_to_samples(30_000)), AUDIO_CTX_FULL);
+        assert_eq!(audio_ctx_for(ms_to_samples(60_000)), AUDIO_CTX_FULL);
+        // Typical windows cost a fraction of it...
+        assert!(audio_ctx_for(ms_to_samples(4_000)) < AUDIO_CTX_FULL / 3);
+        // ...but always with headroom past the audio itself, which is what keeps the last
+        // word from being cut off.
+        for ms in [1_000, 2_000, 5_000, 10_000, 20_000] {
+            let needed = (ms as f32 / 1000.0 * (AUDIO_CTX_FULL as f32 / 30.0)) as i32;
+            assert!(
+                audio_ctx_for(ms_to_samples(ms)) > needed,
+                "{ms}ms: {} leaves no headroom over {needed}",
+                audio_ctx_for(ms_to_samples(ms))
+            );
+        }
+    }
+
+    /// What a pass actually costs on *this* machine, with and without the `audio_ctx` cap.
+    ///
+    /// The question this answers is the only one that matters for latency: is a pass faster
+    /// than the step it has to fit inside? Run it on any machine where captions lag:
+    ///
+    /// ```text
+    /// cargo test --release -p vid_translate audio_ctx_pass_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// `#[ignore]`d because it needs a downloaded model and takes a few seconds. Noise
+    /// rather than speech, so the figures are encode-dominated — which is the part
+    /// `audio_ctx` changes, and the part that does not depend on what was said.
+    #[test]
+    #[ignore]
+    fn audio_ctx_pass_cost() {
+        let path = std::env::var("VID_TRANSLATE_WHISPER_MODEL").unwrap_or_else(|_| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| ".".into())
+                .join("vid_translate")
+                .join("ggml-small.bin")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let Ok(ctx) = preload(&path) else {
+            eprintln!("no model at {path} — skipping");
+            return;
+        };
+        let mut state = ctx.create_state().expect("state");
+        let threads =
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).saturating_sub(2).max(2) as i32;
+
+        // Something with broadband content, so the encoder does real work.
+        let make = |ms: usize| -> Vec<f32> {
+            (0..ms_to_samples(ms))
+                .map(|i| {
+                    let t = i as f32 / SAMPLE_RATE as f32;
+                    0.3 * ((t * 220.0 * 6.283).sin() + (t * 700.0 * 6.283).sin() * 0.5)
+                })
+                .collect()
+        };
+
+        eprintln!("model: {path}  threads: {threads}");
+        for ms in [2_000usize, 6_000, 12_000] {
+            let audio = make(ms);
+            for ctx_tokens in [AUDIO_CTX_FULL, audio_ctx_for(audio.len())] {
+                let mut p = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                p.set_language(Some("ja"));
+                p.set_translate(true);
+                p.set_no_context(true);
+                p.set_temperature(0.0);
+                p.set_temperature_inc(0.0);
+                p.set_n_threads(threads);
+                p.set_audio_ctx(ctx_tokens);
+                p.set_print_special(false);
+                p.set_print_progress(false);
+                p.set_print_realtime(false);
+                p.set_print_timestamps(false);
+                let t = std::time::Instant::now();
+                state.full(p, &audio).expect("inference");
+                let took = t.elapsed();
+                eprintln!(
+                    "  {:>5}ms window, audio_ctx {ctx_tokens:>4} → {:>6.0}ms/pass",
+                    ms,
+                    took.as_secs_f32() * 1000.0
+                );
+            }
+        }
+        unload_all();
+    }
 
     #[test]
     fn drops_whispers_stock_outro_phrases() {

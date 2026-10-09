@@ -27,6 +27,26 @@ pub enum RecognitionResult {
     Silent,
 }
 
+/// Whether audio is arriving in real time.
+///
+/// Whisper needs to know, because its recovery from falling behind is to *discard* audio
+/// (see `whisper::run`), and that is only ever the right answer when something is waiting
+/// to be read. Offline there is no viewer and no clock to stay in sync with, so every
+/// sample must be transcribed however long it takes.
+///
+/// This is passed in rather than inferred from timing, which is a mistake worth recording:
+/// the obvious heuristic — compare audio consumed against the wall clock — cannot tell the
+/// two apart, because a decoder slower than real time falls behind the clock in *both*
+/// cases. Used offline, it threw away an entire 11.8-minute clip mid-measurement and
+/// reported BLEU 0.00. The call site knows the answer for free; nothing else does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pacing {
+    /// A live capture: one second of audio per second, with someone reading the output.
+    Live,
+    /// A file, fed as fast as it can be read. Accuracy measurement, not captioning.
+    Offline,
+}
+
 /// Which engine to recognise with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Backend {
@@ -64,6 +84,8 @@ impl Backend {
 ///
 /// `model_path` is a directory for Vosk and a single `ggml-*.bin` file for Whisper.
 ///
+/// `pacing` says whether this is a live capture; see `Pacing`.
+///
 /// `on_ready` fires once the model is loaded and the next block of audio will actually be
 /// decoded. The caller needs this to tell the user the truth: loading is the slowest part of
 /// starting a session (487MB for Whisper), it happens inside this call, and audio is already
@@ -72,6 +94,7 @@ impl Backend {
 pub fn run<F>(
     backend: Backend,
     model_path: &str,
+    pacing: Pacing,
     rx: std::sync::mpsc::Receiver<Vec<i16>>,
     on_ready: impl FnOnce(),
     on_result: F,
@@ -80,9 +103,11 @@ where
     F: FnMut(RecognitionResult),
 {
     match backend {
+        // Vosk is natively streaming and decodes far faster than real time, so it has no
+        // falling-behind problem to solve and ignores `pacing`.
         Backend::Vosk => vosk::run(model_path, rx, on_ready, on_result),
         Backend::Whisper { lang, translate } => {
-            whisper::run(model_path, lang, translate, rx, on_ready, on_result)
+            whisper::run(model_path, lang, translate, pacing, rx, on_ready, on_result)
         }
     }
 }

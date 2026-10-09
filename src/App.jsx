@@ -36,10 +36,37 @@ const DEFAULT_SETTINGS = {
   enHeight: 100,
   jaHeight: 280,
   useLocalTranslation: false,
+  // Which Whisper size recognises Japanese. "small" is what the accuracy numbers in docs/
+  // were measured at and what an Apple Silicon machine should stay on; a slower CPU needs a
+  // cheaper one, because a pass that overruns the 2s step makes the recognizer fall
+  // permanently behind the audio. See WHISPER_MODELS below.
+  whisperModel: "small",
   // macOS only: capture the default microphone instead of a virtual loopback device. Set
   // from the audio setup screen when the user would rather not install a loopback driver.
   preferMicrophone: false,
 };
+
+/// The Whisper sizes offered, cheapest first. Must stay in step with WHISPER_MODELS in
+/// src-tauri/src/lib.rs, which owns the filenames and the download.
+///
+/// The q5 entries are the same models quantized: roughly a third of the size and
+/// noticeably faster per pass, for a small accuracy loss. On a machine that cannot keep up
+/// with `small`, `small-q5_1` is the first thing to try — it keeps far more of small's
+/// accuracy than dropping to `base` does.
+///
+/// Note that below `small` the *translation* quality falls off faster than the
+/// transcription quality: Japanese→English is the harder half of what the model is being
+/// asked to do here, and `tiny` in particular produces English that is fluent and wrong.
+const WHISPER_MODELS = [
+  { id: "tiny-q5_1",   label: "Tiny (quantized) — 31MB, fastest, rough translation" },
+  { id: "tiny",        label: "Tiny — 74MB, very fast, rough translation" },
+  { id: "base-q5_1",   label: "Base (quantized) — 57MB" },
+  { id: "base",        label: "Base — 141MB" },
+  { id: "small-q5_1",  label: "Small (quantized) — 181MB, best speed/accuracy trade" },
+  { id: "small",       label: "Small — 465MB, recommended on Apple Silicon" },
+  { id: "medium-q5_0", label: "Medium (quantized) — 514MB, slow on most CPUs" },
+  { id: "medium",      label: "Medium — 1.4GB, needs a fast machine" },
+];
 
 function loadSettings() {
   try {
@@ -217,6 +244,27 @@ function SettingsPanel({ draft, setDraft, onSave, onClose, onReset }) {
           </div>
         )}
 
+        {/* ── Japanese recognition ──────────────────── */}
+        <div className="settings-section">Japanese Speech (Whisper)</div>
+
+        <div className="settings-row">
+          <label>Model</label>
+          <select
+            className="settings-input"
+            value={draft.whisperModel}
+            onChange={(e) => upd("whisperModel", e.target.value)}
+          >
+            {WHISPER_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="settings-hint">
+          Bigger is more accurate, smaller is faster. If Japanese captions lag further and
+          further behind the audio, this machine cannot keep up with the current size — drop
+          one. A size you have not used yet downloads the first time you press ▶.
+        </div>
+
         {/* ── Appearance ───────────────────────────── */}
         <div className="settings-section">Appearance</div>
 
@@ -375,8 +423,8 @@ export default function App() {
   // after they press Start. Fire-and-forget and idempotent on the Rust side.
   useEffect(() => {
     if (mode !== "vosk-ja") return;
-    invoke("warm_whisper_model").catch(() => {});
-  }, [mode]);
+    invoke("warm_whisper_model", { model: settings.whisperModel }).catch(() => {});
+  }, [mode, settings.whisperModel]);
 
   // Auto-scroll JA history. Eager chunking can push new lines in quick succession — a
   // "smooth" scrollIntoView call gets interrupted by the next one before finishing, so it
@@ -652,6 +700,7 @@ export default function App() {
         ollamaModel: settings.ollamaModel || null,
         useLocalTranslation: settings.useLocalTranslation,
         preferMicrophone: settings.preferMicrophone,
+        whisperModel: settings.whisperModel,
       });
     }
   };
@@ -791,8 +840,8 @@ export default function App() {
   const MISSING_MODEL_KIND = {
     model_missing: { kind: "en", label: "English speech", type: "vosk" },
     vosk_ja_model_missing: { kind: "ja", label: "Japanese speech", type: "vosk" },
-    // Japanese recognises with Whisper now. One 487MB file, so the download is noticeably
-    // longer than the others and the progress bar earns its keep.
+    // Japanese recognises with Whisper now. One ggml file whose size is the user's choice
+    // (31MB to 1.4GB — see WHISPER_MODELS), so the progress bar earns its keep.
     whisper_ja_model_missing: { kind: "whisper-ja", label: "Japanese speech", type: "whisper" },
     vosk_es_model_missing: { kind: "es", label: "Spanish speech", type: "vosk" },
     ct2_ja_model_missing: { kind: "ja", label: "Japanese local translation", type: "ct2" },
@@ -809,7 +858,7 @@ export default function App() {
       type === "ct2"
         ? invoke("download_ct2_model", { lang: kind })
         : type === "whisper"
-        ? invoke("download_whisper_model")
+        ? invoke("download_whisper_model", { model: settings.whisperModel })
         : invoke("download_vosk_model", { kind });
 
     return (
