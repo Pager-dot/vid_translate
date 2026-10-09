@@ -19,7 +19,7 @@ const SETUP_STATUSES = [
   "model_missing",
   "vosk_ja_model_missing",
   "whisper_ja_model_missing",
-  "vosk_es_model_missing",
+  "whisper_es_model_missing",
   "ct2_ja_model_missing",
   "ct2_es_model_missing",
   "audio_permission_denied",
@@ -245,7 +245,7 @@ function SettingsPanel({ draft, setDraft, onSave, onClose, onReset }) {
         )}
 
         {/* ── Japanese recognition ──────────────────── */}
-        <div className="settings-section">Japanese Speech (Whisper)</div>
+        <div className="settings-section">Speech Recognition (Whisper)</div>
 
         <div className="settings-row">
           <label>Model</label>
@@ -260,7 +260,7 @@ function SettingsPanel({ draft, setDraft, onSave, onClose, onReset }) {
           </select>
         </div>
         <div className="settings-hint">
-          Bigger is more accurate, smaller is faster. If Japanese captions lag further and
+          Used for Japanese and Spanish. Bigger is more accurate, smaller is faster. If captions lag further and
           further behind the audio, this machine cannot keep up with the current size — drop
           one. A size you have not used yet downloads the first time you press ▶.
         </div>
@@ -422,7 +422,7 @@ export default function App() {
   // Load the Whisper model while the user is still looking at the window, rather than
   // after they press Start. Fire-and-forget and idempotent on the Rust side.
   useEffect(() => {
-    if (mode !== "vosk-ja") return;
+    if (mode !== "vosk-ja" && mode !== "vosk-es") return;
     invoke("warm_whisper_model", { model: settings.whisperModel }).catch(() => {});
   }, [mode, settings.whisperModel]);
 
@@ -842,8 +842,10 @@ export default function App() {
     vosk_ja_model_missing: { kind: "ja", label: "Japanese speech", type: "vosk" },
     // Japanese recognises with Whisper now. One ggml file whose size is the user's choice
     // (31MB to 1.4GB — see WHISPER_MODELS), so the progress bar earns its keep.
-    whisper_ja_model_missing: { kind: "whisper-ja", label: "Japanese speech", type: "whisper" },
-    vosk_es_model_missing: { kind: "es", label: "Spanish speech", type: "vosk" },
+    whisper_ja_model_missing: { kind: "whisper", label: "Japanese speech", type: "whisper" },
+    // Spanish recognises with Whisper too now — transcribing rather than translating, so
+    // the Spanish caption line and the es->en model both stay. Same download as Japanese.
+    whisper_es_model_missing: { kind: "whisper", label: "Spanish speech", type: "whisper" },
     ct2_ja_model_missing: { kind: "ja", label: "Japanese local translation", type: "ct2" },
     ct2_es_model_missing: { kind: "es", label: "Spanish local translation", type: "ct2" },
   };

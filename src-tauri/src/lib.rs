@@ -129,7 +129,7 @@ fn whisper_dir() -> std::path::PathBuf {
         .join("vid_translate")
 }
 
-fn whisper_ja_model_path(id: &str) -> std::path::PathBuf {
+fn whisper_model_path(id: &str) -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("VID_TRANSLATE_WHISPER_MODEL") {
         // Still wins over the setting: it points at an arbitrary ggml file, which is how a
         // size outside the list above gets A/B'd without a build.
@@ -488,7 +488,7 @@ fn whisper_model_exists(model: Option<String>) -> bool {
 fn warm_whisper_model(model: Option<String>) {
     let id = whisper_model_id(model);
     std::thread::spawn(move || {
-        let path = whisper_ja_model_path(&id);
+        let path = whisper_model_path(&id);
         if !path.exists() {
             return;
         }
@@ -503,7 +503,7 @@ fn warm_whisper_model(model: Option<String>) {
 /// The files the Japanese recognizer needs: the model itself, and the Silero weights for
 /// the speech gate that stops Whisper captioning background music.
 fn whisper_files(id: &str) -> Vec<(String, std::path::PathBuf)> {
-    let model = whisper_ja_model_path(id);
+    let model = whisper_model_path(id);
     let dir = model
         .parent()
         .map(|p| p.to_path_buf())
@@ -526,7 +526,9 @@ fn download_whisper_model(app: tauri::AppHandle, model: Option<String>) {
             let _ = app.emit(
                 "whisper_download_progress",
                 ModelDownloadProgress {
-                    kind: "whisper-ja".into(),
+                    // Language-neutral: the same ggml file and the same VAD weights serve
+                    // Japanese and Spanish, so the setup card for either listens to this.
+                    kind: "whisper".into(),
                     status: status.into(),
                     downloaded,
                     total,
@@ -754,7 +756,14 @@ fn start_listening(
                 use_local,
                 whisper_model,
             ),
-            "vosk-es" => run_vosk_es_pipeline(app_handle, stop_flag, ollama_key, ollama_model, use_local),
+            "vosk-es" => run_vosk_es_pipeline(
+                app_handle,
+                stop_flag,
+                ollama_key,
+                ollama_model,
+                use_local,
+                whisper_model,
+            ),
             _ => run_vosk_pipeline(app_handle, stop_flag),
         }
     });
@@ -1180,12 +1189,35 @@ fn run_vosk_es_pipeline(
     ollama_key: Option<String>,
     ollama_model: Option<String>,
     use_local: bool,
+    whisper_model: String,
 ) {
-    let es_path = vosk_es_model_path();
+    // Spanish recognises with Whisper, but *transcribes* rather than translating — the
+    // opposite of the Japanese decision above, and measured on a 9.6-minute Spanish clip
+    // against human subtitles:
+    //
+    //   Vosk -> Marian         30.68 BLEU / 62.88 chrF   (the path this replaces)
+    //   Whisper native EN      33.56 BLEU / 65.15 chrF
+    //   Whisper -> Marian      39.60 BLEU / 67.24 chrF
+    //
+    // Swapping only the recognizer and leaving the MT stage alone is worth +8.92 BLEU, and
+    // the es->en Marian model beats Whisper's own translate task by a further +6.04. That
+    // inverts the Japanese result for a reason: Spanish and English are close and
+    // `es->en` is a strong, high-resource model, so nothing is lost handing it text —
+    // whereas Japanese loses meaning in that same handoff.
+    //
+    // Keeping the MT stage also keeps the Spanish caption line. One Whisper pass yields
+    // either the source text or English, never both, and this mode's whole layout is
+    // source above translation.
+    //
+    // The clip was a single clear speaker, which is Vosk's best case (see eval/ja/README.md
+    // on why that matters), so +8.92 is likely a floor rather than the typical gap.
+    let es_path = whisper_model_path(&whisper_model);
     if !es_path.exists() {
-        let _ = app_handle.emit("status", StatusEvent { state: "vosk_es_model_missing".into() });
+        let _ = app_handle.emit("status", StatusEvent { state: "whisper_es_model_missing".into() });
         return;
     }
+    // Unlike the Japanese path, this one always needs the translation model: the recognizer
+    // hands over Spanish, not English.
     if use_local && !marian::is_model_downloaded("es") {
         let _ = app_handle.emit("status", StatusEvent { state: "ct2_es_model_missing".into() });
         return;
@@ -1198,7 +1230,7 @@ fn run_vosk_es_pipeline(
         es_path,
         "es",
         use_local,
-        recognizer::Backend::Vosk,
+        recognizer::Backend::Whisper { lang: "es", translate: false },
     );
 }
 
@@ -1213,7 +1245,7 @@ fn run_vosk_ja_pipeline(
     // Japanese recognises with Whisper, not Vosk. Vosk remains the recognizer for Spanish
     // and English, where it performs acceptably and its sub-second streaming is worth more
     // than the accuracy difference.
-    let ja_path = whisper_ja_model_path(&whisper_model);
+    let ja_path = whisper_model_path(&whisper_model);
     if !ja_path.exists() {
         let _ = app_handle.emit("status", StatusEvent { state: "whisper_ja_model_missing".into() });
         return;

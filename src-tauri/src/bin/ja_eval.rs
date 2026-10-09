@@ -119,9 +119,13 @@ fn pick_backend(lang: &'static str) -> (Backend, std::path::PathBuf) {
                 .join("vid_translate")
                 .join("ggml-small.bin")
         });
-    // Matches the app: native translate unless the two-stage path is asked for.
+    // Matches the app, which differs by language: Japanese uses Whisper's own translate
+    // task, Spanish transcribes and hands the text to the es->en Marian model (+6.04 BLEU
+    // over native translate there — see `run_vosk_es_pipeline`).
+    // VID_TRANSLATE_JA_TWO_STAGE=1 forces the two-stage path for Japanese too.
     let two_stage = std::env::var("VID_TRANSLATE_JA_TWO_STAGE").is_ok_and(|v| v == "1");
-    (Backend::Whisper { lang, translate: !two_stage }, whisper)
+    let translate = lang == "ja" && !two_stage;
+    (Backend::Whisper { lang, translate }, whisper)
 }
 
 /// The plan asks for the pre-change baseline to be recorded before the clause chunker is
