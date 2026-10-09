@@ -1,0 +1,3 @@
+# The corpus is local audio, not repo content — see ../ja/README.md.
+*.wav
+*.txt

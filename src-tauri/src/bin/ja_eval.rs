@@ -79,14 +79,35 @@ fn read_wav_16k_mono(path: &Path) -> Result<Vec<i16>, String> {
     Err(format!("{}: no data chunk", path.display()))
 }
 
+/// Which language pair to measure. Japanese is the default because that is what this
+/// harness was built for; `VID_TRANSLATE_EVAL_LANG=es` points the recognizer model, the
+/// chunker and the translation direction at Spanish instead.
+///
+/// `&'static str` because `recognizer::Backend::Whisper` holds one, for the reason given on
+/// that field: Whisper guesses the language wrong often enough on short windows to matter.
+fn eval_lang() -> &'static str {
+    match std::env::var("VID_TRANSLATE_EVAL_LANG").as_deref() {
+        Ok("ja") | Err(_) => "ja",
+        Ok("es") => "es",
+        Ok(other) => {
+            eprintln!("[ja_eval] unknown VID_TRANSLATE_EVAL_LANG={other:?} — expected ja or es");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Which recognizer to decode with. Japanese ships on Whisper now, so that is the default
 /// here too — `VID_TRANSLATE_EVAL_RECOGNIZER=vosk` keeps the old one reachable for
 /// comparison, which is the whole reason the backends share an interface.
-fn pick_backend() -> (Backend, std::path::PathBuf) {
+///
+/// For Spanish the default is the interesting direction of the same question: Spanish still
+/// ships on Vosk plus the Marian model, so `vosk` is the shipped path and Whisper is the
+/// challenger.
+fn pick_backend(lang: &'static str) -> (Backend, std::path::PathBuf) {
     let vosk = dirs::data_local_dir()
         .unwrap_or_else(|| ".".into())
         .join("vid_translate")
-        .join("vosk-model-ja");
+        .join(format!("vosk-model-{lang}"));
     if std::env::var("VID_TRANSLATE_EVAL_RECOGNIZER").as_deref() == Ok("vosk") {
         return (Backend::Vosk, vosk);
     }
@@ -100,7 +121,7 @@ fn pick_backend() -> (Backend, std::path::PathBuf) {
         });
     // Matches the app: native translate unless the two-stage path is asked for.
     let two_stage = std::env::var("VID_TRANSLATE_JA_TWO_STAGE").is_ok_and(|v| v == "1");
-    (Backend::Whisper { lang: "ja", translate: !two_stage }, whisper)
+    (Backend::Whisper { lang, translate: !two_stage }, whisper)
 }
 
 /// The plan asks for the pre-change baseline to be recorded before the clause chunker is
@@ -111,7 +132,7 @@ fn pick_backend() -> (Backend, std::path::PathBuf) {
 /// Deliberately read here and not in `chunker::for_language`: this is a measurement knob,
 /// and an env var that silently changes what the shipped app does is a different and worse
 /// thing than one that changes what the eval runner does.
-fn pick_chunker() -> Box<dyn ChunkStrategy> {
+fn pick_chunker(lang: &'static str) -> Box<dyn ChunkStrategy> {
     if let Ok("final-only") = std::env::var("VID_TRANSLATE_EVAL_CHUNKER").as_deref() {
         return Box::new(FinalOnlyChunker::default());
     }
@@ -126,10 +147,16 @@ fn pick_chunker() -> Box<dyn ChunkStrategy> {
                 max_chunk_chars: parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(d.max_chunk_chars),
                 max_wait_ms: parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(d.max_wait_ms),
             };
+            // The guard sweep is Japanese-only: the knobs belong to JapaneseChunker, and
+            // the Spanish chunker splits on different evidence entirely.
+            if lang != "ja" {
+                eprintln!("[ja_eval] VID_TRANSLATE_EVAL_GUARDS applies to ja only");
+                std::process::exit(2);
+            }
             eprintln!("[ja_eval] guards {guards:?}");
             Box::new(JapaneseChunker::with_guards(guards))
         }
-        Err(_) => chunker::for_language("ja", true),
+        Err(_) => chunker::for_language(lang, true),
     }
 }
 
@@ -184,6 +211,7 @@ mod realtime {
         samples: Vec<i16>,
         backend: super::Backend,
         model_path: &str,
+        lang: &'static str,
         state: &MarianState,
         chunker: &mut dyn ChunkStrategy,
     ) -> Result<Latencies, String> {
@@ -221,7 +249,7 @@ mod realtime {
             scope.spawn(move || {
                 let stop = AtomicBool::new(false);
                 for (text, head_ms, tail_ms) in rx_chunk {
-                    let en = marian::translate_local_blocking("ja", &text, &stop, state, |_| {});
+                    let en = marian::translate_local_blocking(lang, &text, &stop, state, |_| {});
                     if en.is_empty() || en.starts_with("[translation error") {
                         lat_ref.lock().unwrap().failed += 1;
                         eprintln!("[realtime] chunk translation produced nothing: {en:?}");
@@ -249,7 +277,7 @@ mod realtime {
                         }
                     }
                     let (text, at_ms) = latest;
-                    let en = marian::translate_local_blocking("ja", &text, &stop, state, |_| {});
+                    let en = marian::translate_local_blocking(lang, &text, &stop, state, |_| {});
                     let now = clock_ref.elapsed().as_millis() as u64;
                     let mut l = lat_ref.lock().unwrap();
                     if en.is_empty() || en.starts_with("[translation error") {
@@ -352,12 +380,16 @@ struct ClipResult {
 /// not streaming — it emits finished, punctuated segments rather than a growing partial — so
 /// each line is fed as its own ASR final, which is the honest analogue of what the live
 /// pipeline would see. Everything downstream is the shipped code.
-fn run_text_clip(path: &Path, state: &MarianState) -> Result<ClipResult, String> {
+fn run_text_clip(
+    path: &Path,
+    lang: &'static str,
+    state: &MarianState,
+) -> Result<ClipResult, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let stop_flag = AtomicBool::new(false);
     let started = Instant::now();
 
-    let mut chunker = pick_chunker();
+    let mut chunker = pick_chunker(lang);
     let mut chunks: Vec<Chunk> = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         chunks.extend(chunker.flush(line.trim()));
@@ -369,7 +401,7 @@ fn run_text_clip(path: &Path, state: &MarianState) -> Result<ClipResult, String>
     for chunk in &chunks {
         let t = Instant::now();
         let english =
-            marian::translate_local_blocking("ja", &chunk.text, &stop_flag, state, |_| {});
+            marian::translate_local_blocking(lang, &chunk.text, &stop_flag, state, |_| {});
         latencies_ms.push(t.elapsed().as_millis());
         english_per_chunk.push(english.clone());
         if !english.is_empty() {
@@ -390,6 +422,7 @@ fn run_clip(
     path: &Path,
     backend: Backend,
     model_path: &str,
+    lang: &'static str,
     state: &MarianState,
 ) -> Result<ClipResult, String> {
     let samples = read_wav_16k_mono(path)?;
@@ -404,7 +437,7 @@ fn run_clip(
     }
     drop(tx);
 
-    let mut chunker = pick_chunker();
+    let mut chunker = pick_chunker(lang);
     let mut chunks: Vec<Chunk> = Vec::new();
     // When each chunk was cut. Kept for ordering only: see the note on `latencies_ms`.
     let mut cut_at: Vec<Instant> = Vec::new();
@@ -461,7 +494,7 @@ fn run_clip(
             // Already English: the recognizer did the translating.
             chunk.text.clone()
         } else {
-            marian::translate_local_blocking("ja", &chunk.text, &stop_flag, state, |_| {})
+            marian::translate_local_blocking(lang, &chunk.text, &stop_flag, state, |_| {})
         };
         latencies_ms.push(t.elapsed().as_millis());
         english_per_chunk.push(english.clone());
@@ -498,6 +531,8 @@ fn main() {
         eprintln!("  VID_TRANSLATE_JA_MODEL_DIR overrides the MT model directory (Phase 4 A/B)");
         eprintln!("  VID_TRANSLATE_EVAL_CHUNKER=final-only reproduces the pre-chunker baseline");
         eprintln!("  VID_TRANSLATE_EVAL_REALTIME=1 paces the audio and reports real latency");
+        eprintln!("  VID_TRANSLATE_EVAL_LANG=es measures Spanish instead of Japanese");
+        eprintln!("  VID_TRANSLATE_EVAL_RECOGNIZER=vosk decodes with Vosk instead of Whisper");
         std::process::exit(2);
     }
 
@@ -507,16 +542,18 @@ fn main() {
     let all_text = args
         .iter()
         .all(|a| Path::new(a).extension().and_then(|e| e.to_str()) == Some("txt"));
-    let (backend, model) = pick_backend();
+    let lang = eval_lang();
+    let (backend, model) = pick_backend(lang);
     if !all_text && !model.exists() {
         eprintln!(
-            "no {backend:?} model at {} — start the app once in JA mode to download it, or \
+            "no {backend:?} model at {} — start the app once in {} mode to download it, or \
              point VID_TRANSLATE_WHISPER_MODEL at a ggml file",
-            model.display()
+            model.display(),
+            lang.to_uppercase()
         );
         std::process::exit(1);
     }
-    eprintln!("[ja_eval] recognizer: {backend:?}");
+    eprintln!("[ja_eval] {} via {backend:?}", lang.to_uppercase());
     let model = model.to_string_lossy().to_string();
 
     // One MarianState for the whole run so the model is loaded from disk once.
@@ -529,8 +566,8 @@ fn main() {
         eprintln!("[ja_eval] {}", path.display());
         if realtime {
             match read_wav_16k_mono(path).and_then(|samples| {
-                let mut chunker = pick_chunker();
-                realtime::run(samples, backend, &model, &state, chunker.as_mut())
+                let mut chunker = pick_chunker(lang);
+                realtime::run(samples, backend, &model, lang, &state, chunker.as_mut())
             }) {
                 Ok(l) => {
                     eprintln!("[ja_eval] real-time latency for {}:", path.display());
@@ -544,9 +581,9 @@ fn main() {
             continue;
         }
         let outcome = if path.extension().and_then(|e| e.to_str()) == Some("txt") {
-            run_text_clip(path, &state)
+            run_text_clip(path, lang, &state)
         } else {
-            run_clip(path, backend, &model, &state)
+            run_clip(path, backend, &model, lang, &state)
         };
         match outcome {
             Ok(r) => {
