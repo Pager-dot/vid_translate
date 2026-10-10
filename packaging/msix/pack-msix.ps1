@@ -22,6 +22,8 @@ param(
   [Parameter(Mandatory = $true)][string]$IdentityName,
   [Parameter(Mandatory = $true)][string]$Publisher,
   [Parameter(Mandatory = $true)][string]$PublisherDisplayName,
+  # Must match a name reserved in Partner Center under "Manage app names", exactly.
+  [string]$DisplayName = "VidTranslate",
   [string]$OutFile = "VidTranslate.msix",
   [switch]$SelfSign
 )
@@ -71,6 +73,7 @@ $manifest = Get-Content (Join-Path $PSScriptRoot "AppxManifest.xml") -Raw
 $manifest = $manifest.Replace("@IDENTITY_NAME@", $IdentityName).
                       Replace("@PUBLISHER@", $Publisher).
                       Replace("@PUBLISHER_DISPLAY_NAME@", $PublisherDisplayName).
+                      Replace("@DISPLAY_NAME@", $DisplayName).
                       Replace("@VERSION@", $msixVersion)
 Set-Content -Path (Join-Path $stage "AppxManifest.xml") -Value $manifest -Encoding UTF8
 

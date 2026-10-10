@@ -7,6 +7,10 @@
   "Product identity" once the app name is reserved. The packaging script substitutes them
   from environment variables so nothing fake is ever committed here.
 
+  DisplayName must exactly match a name reserved under "Manage app names" - the Store
+  rejects the upload otherwise, and a trailing period counts. It is substituted too, so a
+  rename needs no code change.
+
   Version is four-part with a trailing 0 (Store requirement); the script derives the first
   three from package.json.
 
@@ -27,7 +31,7 @@
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>VidTranslate</DisplayName>
+    <DisplayName>@DISPLAY_NAME@</DisplayName>
     <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>Live captions and translation for whatever your computer is playing.</Description>
@@ -44,7 +48,7 @@
   <Applications>
     <Application Id="VidTranslate" Executable="VidTranslate.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="VidTranslate"
+        DisplayName="@DISPLAY_NAME@"
         Description="Live captions and translation for whatever your computer is playing."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"

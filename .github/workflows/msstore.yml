@@ -30,6 +30,11 @@ on:
         required: true
         type: string
         default: 'Pager-dot'
+      display_name:
+        description: 'App display name — must match a reserved name exactly (mind trailing dots)'
+        required: true
+        type: string
+        default: 'VidTranslate'
 
 jobs:
   package:
@@ -66,7 +71,8 @@ jobs:
           ./packaging/msix/pack-msix.ps1 `
             -IdentityName '${{ inputs.identity_name }}' `
             -Publisher '${{ inputs.publisher }}' `
-            -PublisherDisplayName '${{ inputs.publisher_display_name }}'
+            -PublisherDisplayName '${{ inputs.publisher_display_name }}' `
+            -DisplayName '${{ inputs.display_name }}'
 
       - uses: actions/upload-artifact@v4
         with:
