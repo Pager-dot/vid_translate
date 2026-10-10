@@ -11,18 +11,25 @@ name: Microsoft Store package
 on:
   workflow_dispatch:
     inputs:
+      # Defaults are this product's real values from Partner Center > Product identity.
+      # They are public (the Store listing exposes them), not secrets — the Store ID is
+      # 9PL487NLXMZC. They are inputs rather than constants so a second product, or a
+      # re-reserved identity, needs no code change.
       identity_name:
-        description: 'Identity/Name from Partner Center (e.g. 12345Publisher.VidTranslate)'
+        description: 'Package/Identity/Name'
         required: true
         type: string
+        default: 'Pager-dot.5358327C330B2'
       publisher:
-        description: 'Identity/Publisher from Partner Center (e.g. CN=ABCD1234-...)'
+        description: 'Package/Identity/Publisher'
         required: true
         type: string
+        default: 'CN=0839342F-E500-4381-896B-B4FCCA4D45B9'
       publisher_display_name:
-        description: 'Publisher display name from Partner Center'
+        description: 'Package/Properties/PublisherDisplayName'
         required: true
         type: string
+        default: 'Pager-dot'
 
 jobs:
   package:
