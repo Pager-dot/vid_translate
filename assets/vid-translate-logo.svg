@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Vid Translate</title>
+  <desc id="desc">A video frame with a play symbol and bilingual speech waves, representing video translation.</desc>
+  <defs>
+    <linearGradient id="bg" x1="56" y1="40" x2="456" y2="472" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#192B52"/>
+      <stop offset="1" stop-color="#101528"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="116" y1="112" x2="393" y2="402" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#55E6D0"/>
+      <stop offset="1" stop-color="#5B8CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#bg)"/>
+  <rect x="91" y="105" width="330" height="245" rx="40" fill="none" stroke="url(#accent)" stroke-width="18"/>
+  <path d="M218 166 L218 289 L316 227.5 Z" fill="#F3F7FF"/>
+  <path d="M137 390 H178 M198 390 H239 M259 390 H300 M320 390 H361" stroke="#55E6D0" stroke-width="12" stroke-linecap="round" opacity=".95"/>
+  <path d="M134 350 V330 C134 316 145 305 159 305 H186" fill="none" stroke="#55E6D0" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M378 105 V125 C378 139 367 150 353 150 H326" fill="none" stroke="#5B8CFF" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="134" cy="330" r="7" fill="#55E6D0"/>
+  <circle cx="378" cy="125" r="7" fill="#5B8CFF"/>
+</svg>
