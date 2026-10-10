@@ -33,5 +33,16 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/VidTranslate");
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/vid_translate");
     }
+    // updater::channel() reads VT_CHANNEL through option_env!, which bakes the value in at
+    // compile time. Cargo does not track ambient env vars, so a cached target dir (CI uses
+    // rust-cache) would happily reuse an object file compiled under a different channel —
+    // and the Microsoft Store build would ship with the in-app updater live, which fails
+    // certification. Re-exporting it through rustc-env makes it part of this build script's
+    // output, which Cargo *does* track, so changing it forces a recompile.
+    println!("cargo:rerun-if-env-changed=VT_CHANNEL");
+    if let Ok(channel) = std::env::var("VT_CHANNEL") {
+        println!("cargo:rustc-env=VT_CHANNEL={channel}");
+    }
+
     tauri_build::build()
 }

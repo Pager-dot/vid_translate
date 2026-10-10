@@ -1,0 +1,69 @@
+name: Microsoft Store package
+
+# Manual only. The Store build is a different artifact from the GitHub release: it is built
+# with VT_CHANNEL=msstore so the in-app updater is disabled (the Store owns updates, and
+# shipping a self-updater is grounds for certification failure), and it is packed as MSIX
+# rather than wrapped in an installer.
+#
+# The resulting .msix is uploaded UNSIGNED — Microsoft signs Store submissions, which is why
+# this route needs no code-signing certificate. Download it from the run and upload it in
+# Partner Center.
+on:
+  workflow_dispatch:
+    inputs:
+      identity_name:
+        description: 'Identity/Name from Partner Center (e.g. 12345Publisher.VidTranslate)'
+        required: true
+        type: string
+      publisher:
+        description: 'Identity/Publisher from Partner Center (e.g. CN=ABCD1234-...)'
+        required: true
+        type: string
+      publisher_display_name:
+        description: 'Publisher display name from Partner Center'
+        required: true
+        type: string
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # No --bundles: the MSIX is packed from the plain release binary, not from an
+      # installer, so there is nothing for the Tauri bundler to produce here.
+      - name: Build (Windows, Store channel)
+        env:
+          # Same CRT reasoning as release.yml: ct2rs CMake-builds CTranslate2 with /MT.
+          RUSTFLAGS: -C target-feature=+crt-static
+          # Read by updater::channel() — this build must never offer to update itself.
+          VT_CHANNEL: msstore
+        run: npm run tauri build -- --no-bundle
+
+      - name: Pack MSIX
+        shell: pwsh
+        run: |
+          ./packaging/msix/pack-msix.ps1 `
+            -IdentityName '${{ inputs.identity_name }}' `
+            -Publisher '${{ inputs.publisher }}' `
+            -PublisherDisplayName '${{ inputs.publisher_display_name }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix
+          retention-days: 7
+          if-no-files-found: error
+          path: VidTranslate.msix

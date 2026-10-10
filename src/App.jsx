@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Icon } from "./ui/Icon";
 import { Select } from "./ui/Select";
 import { Switch } from "./ui/Switch";
@@ -93,6 +94,7 @@ const SETTINGS_CATEGORIES = [
   { id: "speech",      label: "Speech",      icon: "waves" },
   { id: "appearance",  label: "Appearance",  icon: "type" },
   { id: "layout",      label: "Layout",      icon: "sliders" },
+  { id: "about",       label: "About",       icon: "sparkles" },
 ];
 
 const CATEGORY_BLURB = {
@@ -100,6 +102,22 @@ const CATEGORY_BLURB = {
   speech: "How speech is recognised before it is translated.",
   appearance: "How the caption overlay looks on screen.",
   layout: "How much of the display the overlay takes up.",
+  about: "Version, updates, and where this build came from.",
+};
+
+/// Where this copy came from, and so who is responsible for updating it. Keys match
+/// `updater::Channel` in src-tauri/src/updater.rs.
+const CHANNEL_BLURB = {
+  github: "Installed from a GitHub release.",
+  msstore: "Installed from the Microsoft Store.",
+  flatpak: "Installed as a Flatpak.",
+  "linux-package": "Installed from a system package.",
+};
+
+const CHANNEL_UPDATE_NOTE = {
+  msstore: "The Microsoft Store keeps this copy up to date automatically.",
+  flatpak: "Updates arrive through Flathub \u2014 run `flatpak update` or use your software centre.",
+  "linux-package": "This copy is owned by your package manager. New releases are published on GitHub.",
 };
 
 function loadSettings() {
@@ -179,12 +197,85 @@ function SettingsCard({ title, children }) {
   );
 }
 
-function SettingsPanel({ draft, setDraft, onSave, onClose, onReset }) {
+function SettingsPanel({ appInfo, draft, setDraft, onSave, onClose, onReset }) {
   const [category, setCategory]     = useState("translation");
   const [pullInput, setPullInput]   = useState("");
   const [pullStatus, setPullStatus] = useState("idle"); // idle | pulling | done | error
   const [pullProgress, setPullProgress] = useState(null);
   const [pullMsg, setPullMsg]       = useState("");
+
+  // idle | checking | available | uptodate | downloading | installing | error
+  const [updState, setUpdState]       = useState("idle");
+  const [update, setUpdate]           = useState(null); // { version, notes, pub_date }
+  const [updProgress, setUpdProgress] = useState(null); // { downloaded, total }
+  const [updMsg, setUpdMsg]           = useState("");
+
+  // Same event shape as the model downloads, so the progress widget below is the one
+  // already used for `pull_progress` — see updater.rs.
+  useEffect(() => {
+    let unlisten;
+    listen("update_progress", (e) => {
+      const d = e.payload;
+      if (d.status === "downloading") {
+        setUpdState("downloading");
+        setUpdProgress(d.total ? { downloaded: d.downloaded, total: d.total } : null);
+        setUpdMsg("Downloading update…");
+      } else if (d.status === "installing") {
+        setUpdState("installing");
+        setUpdProgress(null);
+        setUpdMsg("Installing…");
+      } else if (d.status === "done") {
+        setUpdState("installing");
+        setUpdProgress(null);
+        setUpdMsg("Restarting…");
+      } else if (d.status === "error") {
+        setUpdState("error");
+        setUpdProgress(null);
+        setUpdMsg(d.error || "Update failed");
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => unlisten?.();
+  }, []);
+
+  // Check once when the About pane is first opened. Deliberately not on app launch: this is
+  // a transparent always-on-top caption strip, and nothing here should interrupt a session.
+  useEffect(() => {
+    if (category !== "about" || !appInfo?.updates_supported || updState !== "idle") return;
+    checkForUpdate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [category, appInfo]);
+
+  const checkForUpdate = async () => {
+    setUpdState("checking");
+    setUpdMsg("Checking for updates…");
+    try {
+      const found = await invoke("check_for_update");
+      if (found) {
+        setUpdate(found);
+        setUpdState("available");
+        setUpdMsg("");
+      } else {
+        setUpdState("uptodate");
+        setUpdMsg("You're on the latest version.");
+      }
+    } catch (e) {
+      setUpdState("error");
+      setUpdMsg(String(e));
+    }
+  };
+
+  const installUpdate = async () => {
+    setUpdState("downloading");
+    setUpdMsg("Starting…");
+    try {
+      // Resolves only if the install fails — on success the app restarts into the new
+      // version and this frame is gone.
+      await invoke("install_update");
+    } catch (e) {
+      setUpdState("error");
+      setUpdMsg(String(e));
+    }
+  };
 
   useEffect(() => {
     let unlisten;
@@ -222,6 +313,34 @@ function SettingsPanel({ draft, setDraft, onSave, onClose, onReset }) {
   };
 
   const upd = (key, val) => setDraft((d) => ({ ...d, [key]: val }));
+
+  // Deliberately the same markup as `pullFeedback` below — one visual language for
+  // "something is downloading in the settings console".
+  const updateFeedback = updMsg && (
+    <div
+      className="settings-feedback"
+      data-tone={updState === "uptodate" ? "success" : updState === "error" ? "error" : "info"}
+    >
+      <Icon
+        name={
+          updState === "uptodate" ? "checkmark"
+          : updState === "error" ? "alert-triangle"
+          : "download"
+        }
+      />
+      <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, flex: 1 }}>
+        <span>{updMsg}</span>
+        {updProgress && (
+          <div className="settings-progress">
+            <div
+              className="settings-progress__fill"
+              style={{ width: `${Math.round((updProgress.downloaded / updProgress.total) * 100)}%` }}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
 
   const pullFeedback = (pullProgress || pullMsg) && (
     <div
@@ -490,6 +609,86 @@ function SettingsPanel({ draft, setDraft, onSave, onClose, onReset }) {
               </p>
             </div>
           )}
+
+          {category === "about" && (
+            <div className="settings-category-panel">
+              <SettingsCard title="VidTranslate">
+                <SettingsRow
+                  label="Version"
+                  description={CHANNEL_BLURB[appInfo?.channel] || "Loading build details…"}
+                  feedback={appInfo?.updates_supported ? updateFeedback : null}
+                >
+                  <span className="settings-unit">{appInfo ? appInfo.version : "—"}</span>
+                </SettingsRow>
+
+                {appInfo?.updates_supported ? (
+                  <SettingsRow
+                    label={updState === "available" ? `Version ${update.version} is available` : "Updates"}
+                    description={
+                      updState === "available"
+                        ? "Downloads and restarts VidTranslate. Any running session will stop."
+                        : "Checked when you open this page."
+                    }
+                    tight
+                  >
+                    {updState === "available" ? (
+                      <button
+                        type="button"
+                        className="settings-button settings-button--primary"
+                        onClick={installUpdate}
+                      >
+                        <Icon name="download" />
+                        Install and restart
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="settings-button settings-button--quiet"
+                        onClick={checkForUpdate}
+                        disabled={updState === "checking" || updState === "downloading" || updState === "installing"}
+                      >
+                        <Icon name="reset" />
+                        Check for updates
+                      </button>
+                    )}
+                  </SettingsRow>
+                ) : (
+                  <SettingsRow
+                    label="Updates"
+                    description={CHANNEL_UPDATE_NOTE[appInfo?.channel] || ""}
+                    tight
+                  >
+                    {appInfo?.releases_url && (
+                      <button
+                        type="button"
+                        className="settings-button settings-button--quiet"
+                        onClick={() => openUrl(appInfo.releases_url).catch(() => {})}
+                      >
+                        View releases
+                      </button>
+                    )}
+                  </SettingsRow>
+                )}
+              </SettingsCard>
+
+              {updState === "available" && update?.notes && (
+                <SettingsCard title={`What's new in ${update.version}`}>
+                  <p className="settings-help" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                    {update.notes}
+                  </p>
+                </SettingsCard>
+              )}
+
+              {appInfo?.os === "macos" && (
+                <p className="settings-help">
+                  Heads up: this build is ad-hoc signed rather than notarised, so macOS
+                  treats each update as a different app and clears its audio-recording
+                  permission. After updating, re-allow VidTranslate under Privacy &amp;
+                  Security → Audio Recording.
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         <footer className="settings-pane__footer">
@@ -533,6 +732,14 @@ export default function App() {
 
   const [settings, setSettings] = useState(loadSettings);
   const [draft, setDraft]       = useState(settings);
+
+  // Version, platform, and who owns updates for this copy. Loaded once at App level rather
+  // than inside the settings panel, because the audio-fault screens below need `os` to word
+  // themselves correctly and they render in overlay mode, with settings closed.
+  const [appInfo, setAppInfo] = useState(null);
+  useEffect(() => {
+    invoke("app_info").then(setAppInfo).catch(() => {});
+  }, []);
 
   const unlistenRefs = useRef([]);
   const clearTimer   = useRef(null);
@@ -946,6 +1153,7 @@ export default function App() {
   if (settingsOpen) {
     return (
       <SettingsPanel
+        appInfo={appInfo}
         draft={draft}
         setDraft={setDraft}
         onSave={saveSettings}
@@ -955,14 +1163,20 @@ export default function App() {
     );
   }
 
-  // ── macOS audio capture faults ───────────────────────────────────────────────
-  // Linux and Windows tap the system output mix directly, so these screens only ever
-  // appear on macOS. Capture there goes through a Core Audio process tap, which needs no
-  // driver and no routing setup — only permission, which macOS ties to the app's code
-  // signature. Release builds are ad-hoc signed, so the grant is lost on every update
-  // while the stale entry still reads as enabled: the permission screen is routine, not
-  // an edge case, and its copy says "we're not hearing anything" rather than accusing the
-  // user of denying something.
+  // ── Audio capture faults ─────────────────────────────────────────────────────
+  // Windows taps the output mix through WASAPI loopback and cannot fail in a way the user
+  // could act on, so these screens are macOS and Linux only.
+  //
+  // macOS: capture goes through a Core Audio process tap, which needs no driver and no
+  // routing setup — only permission, which macOS ties to the app's code signature. Release
+  // builds are ad-hoc signed, so the grant is lost on every update while the stale entry
+  // still reads as enabled: the permission screen is routine, not an edge case, and its
+  // copy says "we're not hearing anything" rather than accusing the user of denying
+  // something.
+  //
+  // Linux: nothing is denied, the plumbing is simply absent — no PulseAudio/PipeWire
+  // server, no `parec`, or no monitor source to read (the normal case in a sandbox). Same
+  // two statuses, different words, hence the `os` branch below.
   if (status === "audio_permission_denied" || status === "audio_tap_unavailable") {
     const useMicrophoneInstead = () => {
       setSettings((s) => {
@@ -977,6 +1191,19 @@ export default function App() {
       setTimeout(() => toggleRef.current(), 100);
     };
     const denied = status === "audio_permission_denied";
+    const isLinux = appInfo?.os === "linux";
+    const title = denied
+      ? "Not hearing any audio"
+      : isLinux
+        ? "No system audio source"
+        : "System audio unavailable";
+    const message = denied
+      ? isLinux
+        ? "VidTranslate stopped receiving audio from your system's output. Check that sound is playing and that PulseAudio or PipeWire is still running, then try again."
+        : "macOS needs permission to let VidTranslate hear what your Mac is playing. Allow it under Privacy & Security → Audio Recording, then try again."
+      : isLinux
+        ? "VidTranslate could not find a monitor source to record your system audio from. It needs PulseAudio or PipeWire with pulseaudio-utils (`parec`) available. You can caption your microphone instead."
+        : "Capturing system audio needs macOS 14.4 or later. You can caption your microphone instead.";
 
     return (
       <div className="overlay" data-tauri-drag-region>
@@ -986,15 +1213,13 @@ export default function App() {
         <div className="setup-card" data-tauri-drag-region>
           <PulseRing phase="error" compact motionEnabled={false} />
           <div className="setup-card__title" data-tauri-drag-region>
-            {denied ? "Not hearing any audio" : "System audio unavailable"}
+            {title}
           </div>
           <p className="setup-card__message" data-tauri-drag-region>
-            {denied
-              ? "macOS needs permission to let VidTranslate hear what your Mac is playing. Allow it under Privacy & Security → Audio Recording, then try again."
-              : "Capturing system audio needs macOS 14.4 or later. You can caption your microphone instead."}
+            {message}
           </p>
           <div className="setup-card__actions">
-            {denied && (
+            {denied && !isLinux && (
               <button
                 type="button"
                 className="overlay-button overlay-button--primary"
@@ -1005,7 +1230,7 @@ export default function App() {
             )}
             <button
               type="button"
-              className={denied ? "overlay-button" : "overlay-button overlay-button--primary"}
+              className={denied && !isLinux ? "overlay-button" : "overlay-button overlay-button--primary"}
               onClick={retry}
             >
               Try again

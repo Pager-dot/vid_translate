@@ -14,7 +14,7 @@ pub use macos::{capture_fault, preflight, set_prefer_microphone, start_capture};
 #[cfg(target_os = "windows")]
 pub use windows::start_capture;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub use linux::start_capture;
+pub use linux::{capture_fault, preflight, start_capture};
 
 /// Why a capture session cannot produce audio. macOS-only in practice, but shared so
 /// `lib.rs` can map faults to frontend statuses without platform branches.
@@ -57,15 +57,19 @@ impl CaptureFault {
     }
 }
 
-/// Linux and Windows tap the system output mix directly (a PulseAudio sink monitor / WASAPI
-/// loopback), with no permission gate and no device for the user to choose, so these two are
-/// no-ops there. Only macOS needs them — see `macos.rs` and `tap.rs`.
-#[cfg(not(target_os = "macos"))]
+/// Windows taps the system output mix through WASAPI loopback on the default render device:
+/// no permission gate, no device for the user to choose, and `start_capture` cannot fail in a
+/// way the user could act on. So these stay no-ops there.
+///
+/// macOS (`macos.rs`/`tap.rs`) and Linux (`linux.rs`) both implement them for real — macOS
+/// because TCC can deny the tap, Linux because `parec`/`pactl` or a monitor source may simply
+/// not be there, which is the normal case inside a Flatpak sandbox.
+#[cfg(target_os = "windows")]
 pub fn preflight() -> Result<(), CaptureFault> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 pub fn capture_fault() -> Option<CaptureFault> {
     None
 }

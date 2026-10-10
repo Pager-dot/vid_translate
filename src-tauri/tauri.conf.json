@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "VidTranslate",
-  "version": "0.0.6",
+  "version": "../package.json",
   "identifier": "com.paritosh.vidtranslate",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -30,9 +30,21 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFDRjM2QjQ4RjBGMTE5OUUKUldTZUdmSHdTR3Z6SE5nRlZOZ1B0NmVRY3k2Z2lsNUtNdEQ1eTBiWlYwVDZqY3ppWXFjbTlWeWoK",
+      "endpoints": [
+        "https://github.com/Pager-dot/vid_translate/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

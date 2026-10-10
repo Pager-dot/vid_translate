@@ -8,7 +8,8 @@
     "dev:macos": "bash scripts/dev-macos.sh",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "version:set": "node scripts/bump-version.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

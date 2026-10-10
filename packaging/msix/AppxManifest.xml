@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX manifest for the Microsoft Store build.
+
+  Identity/Name, Identity/Publisher and PublisherDisplayName are NOT free choices: they must
+  match, character for character, the values Partner Center shows under
+  "Product identity" once the app name is reserved. The packaging script substitutes them
+  from environment variables so nothing fake is ever committed here.
+
+  Version is four-part with a trailing 0 (Store requirement); the script derives the first
+  three from package.json.
+
+  runFullTrust is what makes this a packaged desktop (Desktop Bridge) app rather than a UWP
+  one: VidTranslate links libvosk, builds whisper.cpp, and captures the system audio mix
+  through WASAPI loopback — none of which is reachable from the UWP sandbox.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="@IDENTITY_NAME@"
+    Publisher="@PUBLISHER@"
+    Version="@VERSION@"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>VidTranslate</DisplayName>
+    <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Live captions and translation for whatever your computer is playing.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="VidTranslate" Executable="VidTranslate.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="VidTranslate"
+        Description="Live captions and translation for whatever your computer is playing."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Square71x71Logo="Assets\Square71x71Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <!-- Loopback capture of the default render device, and the microphone fallback. -->
+    <DeviceCapability Name="microphone" />
+  </Capabilities>
+</Package>

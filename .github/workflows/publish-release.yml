@@ -1,0 +1,70 @@
+name: Publish release
+
+# Releases are cut as drafts, and a draft's assets are not downloadable without a token —
+# so a draft cannot serve latest.json and no installed copy can see it. Publishing IS the
+# rollout switch.
+#
+# This exists rather than clicking "Publish release" in the web UI so the moment an update
+# goes live is recorded in the Actions log, and so the updater endpoint is actually fetched
+# and checked immediately afterwards.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v0.0.7)'
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        # --latest is what makes the release answer `releases/latest/download/...`, which
+        # is the updater endpoint configured in tauri.conf.json.
+        run: gh release edit "$TAG" --draft=false --latest
+
+      - name: Verify the updater endpoint now serves this release
+        env:
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/$REPO/releases/latest/download/latest.json"
+          # GitHub takes a moment to re-point /releases/latest after un-drafting.
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$url" -o latest.json; then break; fi
+            echo "attempt $attempt: not served yet, retrying…"; sleep 10
+          done
+          cat latest.json
+          TAG="$TAG" node -e '
+            const m = require("./latest.json");
+            const want = process.env.TAG.replace(/^v/, "");
+            if (m.version !== want) {
+              console.error(`::error::endpoint serves ${m.version}, expected ${want}`);
+              process.exit(1);
+            }
+            for (const p of ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]) {
+              if (!m.platforms?.[p]?.signature) {
+                console.error(`::error::${p} is missing from the published manifest`);
+                process.exit(1);
+              }
+            }
+            console.log(`latest.json serves ${m.version} for all three platforms.`);
+          '
+
+      - name: Confirm each advertised artifact is actually downloadable
+        run: |
+          set -euo pipefail
+          node -e 'for (const p of Object.values(require("./latest.json").platforms)) console.log(p.url)' \
+            | while read -r url; do
+                code=$(curl -sS -o /dev/null -w '%{http_code}' -L -r 0-0 "$url")
+                echo "$code  $url"
+                [ "$code" = "206" ] || [ "$code" = "200" ] || { echo "::error::not downloadable: $url"; exit 1; }
+              done

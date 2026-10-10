@@ -395,6 +395,40 @@ streaming feel while still producing English output.
 
 ---
 
+## Release & Update Gotchas
+
+Three places where the obvious thing is wrong, all of them silent failures:
+
+- **The macOS `.app.tar.gz` the bundler writes is the UNSIGNED app.** `tauri build` produces
+  the updater tarball before CI's `codesign --sign -` runs, so shipping the bundler's tarball
+  would push an unsigned bundle that Apple Silicon refuses to launch. `release.yml` deletes it
+  and re-tars the signed `.app`, then re-signs with `tauri signer sign`.
+- **The AppImage signature is stale by upload time.** The wayland un-bundling step rewrites
+  every byte of the image after the bundler signed it. `release.yml` re-signs *after* the
+  `unsquashfs` verification block, so a bad repack fails the build rather than producing a
+  correctly-signed broken image.
+- **`latest.json` is all-or-nothing.** Tauri validates the entire manifest before it compares
+  versions, so one missing signature does not degrade that platform — it breaks updates on
+  *every* platform. `scripts/make-latest-json.mjs` therefore hard-fails rather than emitting a
+  partial manifest.
+
+Also worth knowing:
+
+- **Only one artifact per platform is updater-capable:** the macOS `.app.tar.gz`, the Linux
+  AppImage (not the `.deb`), and the Windows NSIS `-setup.exe` (not the `.msi` — a manifest
+  can only name one Windows installer). `updater::channel()` returns `LinuxPackage` when
+  `$APPIMAGE` is unset, which is how a `.deb` install knows not to offer updates.
+- **`VT_CHANNEL` is re-exported through `build.rs`.** `updater::channel()` reads it with
+  `option_env!`, and Cargo does not track ambient env vars — with `rust-cache` in CI, a cached
+  object file compiled under a different channel would be reused, and the Store build would
+  ship with the updater live. `build.rs` emits it as `cargo:rustc-env` so Cargo tracks it as
+  build-script output and forces a recompile.
+- **The updater is driven from Rust commands, not the JS plugin.** That is why
+  `capabilities/default.json` needs no `updater:default` entry: the frontend only invokes
+  `app_info` / `check_for_update` / `install_update`, which `core:default` already allows.
+
+---
+
 ## Known Limitations & Future Work
 
 | Issue | Notes |
@@ -403,4 +437,5 @@ streaming feel while still producing English output.
 | Vosk logs to stderr | `LOG (VoskAPI:...)` lines appear in the terminal. Suppress by redirecting stderr in the Vosk init, or setting `VOSK_LOG_LEVEL=0` env var. |
 | macOS 14.4+ only | Core Audio process taps do not exist below 14.4, and the BlackHole fallback was deliberately deleted rather than maintained. A machine below the floor gets `audio_tap_unavailable` and the microphone fallback. Restoring older support would mean reinstating the whole loopback-driver path. |
 | TCC grant dies on every update | macOS ties the audio-recording permission to the code signature, and releases are ad-hoc signed, so updating the app silently revokes it while System Settings still shows it enabled. A Developer ID certificate is the only real fix; until then the permission screen is a routine part of the flow. |
+| Flathub blocked on libvosk | `src-tauri/vendor/linux-x86_64/libvosk.so` is a prebuilt binary, and Flathub requires building from source with no network access during the build. Either build Vosk (Kaldi + OpenFST + OpenBLAS) from source as manifest modules, or declare it `extra-data`. Also needs the `parec`/`pactl` subprocesses in `audio/linux.rs` replaced with an in-process libpulse client, since neither binary exists in the freedesktop runtime. |
 | Permission denial is detected heuristically | The tap API reports success even when denied, so the only signal is "buffers arriving, every sample bit-exact zero". `silence_verdict()` waits 6s before calling it. A genuinely silent 6s with nothing playing is indistinguishable in principle — it is only safe because the verdict clears permanently on the first non-zero sample. |

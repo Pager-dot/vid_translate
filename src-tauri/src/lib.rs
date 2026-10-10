@@ -3,6 +3,7 @@ pub mod chunker;
 pub mod debug;
 pub mod marian;
 pub mod recognizer;
+pub mod updater;
 
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1396,6 +1397,9 @@ fn make_window_mission_control_visible(window: &tauri::WebviewWindow) -> Result<
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Always registered, never unconditionally used — `updater::channel()` decides at
+        // runtime whether this build is allowed to update itself. See src/updater.rs.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Cosmetic-only: a failure here leaves the widget working, just missing from
             // Mission Control, so it is logged rather than aborting startup.
@@ -1421,6 +1425,9 @@ pub fn run() {
             whisper_model_exists,
             warm_whisper_model,
             open_audio_privacy_settings,
+            updater::app_info,
+            updater::check_for_update,
+            updater::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

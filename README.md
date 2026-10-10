@@ -241,6 +241,63 @@ rebuild, because ad-hoc signatures change every time.
 
 ---
 
+## 🔄 Updates
+
+Once installed, VidTranslate checks for new versions itself: **Settings → About** shows the
+current version, checks when you open it, and offers a one-click download-and-restart.
+
+Which copies update themselves depends on where they came from, and the About pane says so:
+
+| Installed from | Updated by |
+|---|---|
+| GitHub release (`.dmg`, `.AppImage`, `.msi`/`-setup.exe`) | VidTranslate itself |
+| Microsoft Store | The Store, automatically |
+| Flatpak | Flathub / your software centre |
+| `.deb` | Your package manager |
+
+The last three are detected at runtime and the in-app updater turns itself off — Flathub and
+the Store both forbid apps that update themselves, and a `.deb` lives under `/usr`, which is
+not ours to overwrite. Update packages are verified against a minisign public key baked into
+the app (`plugins.updater.pubkey` in `tauri.conf.json`), so an update only installs if it was
+signed with the matching private key.
+
+> **macOS:** releases are ad-hoc signed rather than notarised, so macOS sees each update as a
+> different app and clears its audio-recording permission. After updating you will be asked to
+> allow VidTranslate again under **Privacy & Security → Audio Recording**. A Developer ID
+> certificate is the only real fix.
+
+---
+
+## 🚢 Cutting a Release
+
+```bash
+npm run version:set -- 0.0.7     # package.json + Cargo.toml + both lockfiles
+git commit -am "chore(release): 0.0.7"
+git tag v0.0.7 && git push && git push --tag v0.0.7
+```
+
+The tag triggers `.github/workflows/release.yml`, which builds all three platforms, signs the
+updater artifacts, assembles `latest.json`, and opens a **draft** release.
+
+Nothing reaches users until the draft is published, because the updater endpoint is
+`releases/latest/download/latest.json` and GitHub resolves `/latest` only to a published,
+non-prerelease release. Publishing is therefore the rollout switch — run the **Publish
+release** workflow with the tag, which un-drafts it and then verifies that the endpoint
+really serves that version for all three platforms.
+
+Two repository secrets are required, or the build fails (deliberately — a release that cannot
+be signed must not ship):
+
+| Secret | What |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | Contents of the minisign private key (`tauri signer generate`) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Its password, empty if the key has none |
+
+> **Lose that private key and every installed copy loses its update path for good** — the
+> public key is compiled into apps already out there. Keep an offline backup.
+
+---
+
 ## 📦 Building for Release
 
 ### 🐧 Linux (AppImage)
