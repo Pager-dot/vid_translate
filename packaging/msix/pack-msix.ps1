@@ -41,9 +41,16 @@ Write-Host "Packaging VidTranslate $msixVersion"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $stage "Assets") -Force | Out-Null
 
-$exe = Join-Path $release "VidTranslate.exe"
-if (-not (Test-Path $exe)) { throw "no release binary at $exe - run `npm run tauri build` first" }
-Copy-Item $exe $stage
+# `tauri build --no-bundle` leaves the raw Cargo artifact, which is named after the bin
+# target (vid_translate.exe) - only the bundler renames it to productName. The manifest's
+# Application/@Executable says VidTranslate.exe, so rename on the way into the stage.
+$exe = @("VidTranslate.exe", "vid_translate.exe") |
+  ForEach-Object { Join-Path $release $_ } |
+  Where-Object { Test-Path $_ } |
+  Select-Object -First 1
+if (-not $exe) { throw "no release binary in $release - run ``npm run tauri build`` first" }
+Write-Host "Using $exe"
+Copy-Item $exe (Join-Path $stage "VidTranslate.exe")
 
 # The four vendored DLLs sit beside the exe, not in a resources\ subfolder: libvosk is
 # linked at load time, and Windows resolves that from the executable's own directory.
