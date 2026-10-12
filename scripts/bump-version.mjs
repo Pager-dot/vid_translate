@@ -52,7 +52,8 @@ for (let i = 0; i < lines.length; i++) {
     continue;
   }
   if (inPackage && /^\s*version\s*=/.test(line)) {
-    lines[i] = line.replace(/=.*$/, `= "${version}"`);
+    // [^\r]* rather than .*$: with CRLF checkouts the line ends in \r, which `.` won't match.
+    lines[i] = line.replace(/=[^\r]*/, `= "${version}"`);
     patched = true;
     break;
   }
