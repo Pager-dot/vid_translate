@@ -156,6 +156,17 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: npm run tauri build
 
+      # Diagnostics only (never fails the release): how ggml was configured on this runner.
+      # CI builds ran whisper ~5x slower than local ones; see msstore-diagnose.yml.
+      - name: ggml diagnostics (Windows)
+        if: matrix.platform == 'windows-latest'
+        continue-on-error: true
+        shell: bash
+        run: |
+          cmake --version | head -1
+          grep -hE '^(GGML_|CMAKE_GENERATOR|CMAKE_C_COMPILER|CMAKE_(C|CXX)_FLAGS|OpenMP_)' src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt | sort -u
+          grep -rhoE '/arch:[A-Z0-9.]+' src-tauri/target/release/build/whisper-rs-sys-*/out/build/ggml/src/ 2>/dev/null | sort | uniq -c
+
       # linuxdeploy bundles the build machine's libwayland-client, but libEGL is NOT
       # bundled — so the *host's* Mesa gets force-linked against Ubuntu 22.04's old
       # wayland libs and dies with "Could not create default EGL display:

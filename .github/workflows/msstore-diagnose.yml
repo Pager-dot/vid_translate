@@ -1,0 +1,105 @@
+name: Microsoft Store package (ggml diagnostics)
+
+# Manual only. Same build as msstore.yml, plus a step that prints how whisper.cpp's ggml was
+# configured and compiled on the runner. CI builds ran whisper ~5x slower than local builds
+# on the same machine, with fewer AVX2/FMA/F16C instructions in the binary, and the runner's
+# CMake log is the only place that shows why. The .msix is still uploaded, so a good run
+# doubles as a Store build.
+on:
+  workflow_dispatch:
+    inputs:
+      identity_name:
+        description: 'Package/Identity/Name'
+        required: true
+        type: string
+        default: 'Pager-dot.5358327C330B2'
+      publisher:
+        description: 'Package/Identity/Publisher'
+        required: true
+        type: string
+        default: 'CN=0839342F-E500-4381-896B-B4FCCA4D45B9'
+      publisher_display_name:
+        description: 'Package/Properties/PublisherDisplayName'
+        required: true
+        type: string
+        default: 'Pager-dot'
+      display_name:
+        description: 'App display name — must match a reserved name exactly (mind trailing dots)'
+        required: true
+        type: string
+        default: 'VidTranslate'
+
+# Portable AVX2 baseline instead of -march=native on whatever runner the job lands on.
+env:
+  GGML_NATIVE: "OFF"
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Own cache key: this run must compile ggml from scratch, or the diagnostics would
+      # describe a cached build instead of what this runner produces.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ggml-diagnose-1
+
+      - run: npm ci
+
+      - name: Build (Windows, Store channel)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+          VT_CHANNEL: msstore
+        run: npm run tauri build -- --no-bundle
+
+      - name: ggml diagnostics
+        shell: bash
+        run: |
+          set -u
+          echo "::group::toolchain"
+          cmake --version | head -1
+          cl 2>&1 | head -1 || true
+          echo "::endgroup::"
+          for c in src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
+            echo "::group::$c"
+            grep -E '^(GGML_|CMAKE_GENERATOR|CMAKE_C_COMPILER|CMAKE_(C|CXX)_FLAGS|CMAKE_MSVC_RUNTIME|OpenMP_)' "$c" | sort
+            echo "::endgroup::"
+          done
+          echo "::group::ggml-cpu compile flags"
+          grep -rhoE '/arch:[A-Z0-9.]+|GGML_(AVX|AVX2|FMA|F16C|BMI2|AVX512)[A-Z0-9_]*' \
+            src-tauri/target/release/build/whisper-rs-sys-*/out/build/ggml/src/ggml-cpu.vcxproj \
+            src-tauri/target/release/build/whisper-rs-sys-*/out/build/ggml/src/ggml-cpu/*.vcxproj 2>/dev/null | sort | uniq -c || true
+          echo "::endgroup::"
+          od="/c/Program Files/LLVM/bin/llvm-objdump.exe"
+          if [ -x "$od" ]; then
+            "$od" -d --no-show-raw-insn src-tauri/target/release/vid_translate.exe > dis.txt
+            # Local build on an i7-1255U (fast): zmm ~5200, vfmadd-ymm ~194, vcvtph2ps ~48.
+            echo "zmm: $(grep -c zmm dis.txt)  vfmadd-ymm: $(grep -cE 'vfmadd...ps.*ymm' dis.txt)  vcvtph2ps: $(grep -c vcvtph2ps dis.txt)"
+          fi
+          # Fail loudly rather than ship a build that runs whisper without AVX2.
+          grep -q '^GGML_AVX2:BOOL=ON' src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt \
+            || { echo "::error::ggml was configured without AVX2"; exit 1; }
+
+      - name: Pack MSIX
+        shell: pwsh
+        run: |
+          ./packaging/msix/pack-msix.ps1 `
+            -IdentityName '${{ inputs.identity_name }}' `
+            -Publisher '${{ inputs.publisher }}' `
+            -PublisherDisplayName '${{ inputs.publisher_display_name }}' `
+            -DisplayName '${{ inputs.display_name }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix
+          retention-days: 7
+          if-no-files-found: error
+          path: VidTranslate.msix
