@@ -61,7 +61,7 @@ jobs:
           # whisper-rs-sys doesn't rerun its build script when GGML_* env vars change, so a
           # restored cache keeps whatever ggml was compiled before. Bump this key whenever
           # GGML_* settings change, or the old build (e.g. AVX-512 from -march=native) ships.
-          key: ggml-native-off
+          key: ggml-opt-1
 
       - run: npm ci
 

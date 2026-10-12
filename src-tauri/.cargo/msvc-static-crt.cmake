@@ -13,5 +13,11 @@ if(CMAKE_HOST_WIN32)
         set(CMAKE_${lang}_FLAGS${cfg} "${_f}" CACHE STRING "" FORCE)
       endif()
     endforeach()
+    # In cargo --release builds cmake-rs replaces CMAKE_<LANG>_FLAGS_RELEASE with cc's flags,
+    # which carry no optimisation level for MSVC, so whisper.cpp and CTranslate2 were built
+    # unoptimised (whisper ran ~5x slower than in `tauri dev`). Put /O2 back if it's missing.
+    if(DEFINED CMAKE_${lang}_FLAGS_RELEASE AND NOT CMAKE_${lang}_FLAGS_RELEASE MATCHES "[/-]O[12xd]")
+      set(CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG" CACHE STRING "" FORCE)
+    endif()
   endforeach()
 endif()

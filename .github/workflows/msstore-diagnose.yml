@@ -51,7 +51,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: ggml-diagnose-1
+          key: ggml-diagnose-2
 
       - run: npm ci
 
@@ -88,6 +88,8 @@ jobs:
           # Fail loudly rather than ship a build that runs whisper without AVX2.
           grep -q '^GGML_AVX2:BOOL=ON' src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt \
             || { echo "::error::ggml was configured without AVX2"; exit 1; }
+          grep -qE '^CMAKE_C_FLAGS_RELEASE:STRING=.*[/-]O2' src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt \
+            || { echo "::error::ggml Release flags have no /O2 (unoptimised build)"; exit 1; }
 
       - name: Pack MSIX
         shell: pwsh
