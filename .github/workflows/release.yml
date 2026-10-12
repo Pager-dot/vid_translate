@@ -8,6 +8,12 @@ on:
       - 'v*'
   workflow_dispatch: {}
 
+# whisper.cpp defaults to GGML_NATIVE=ON (-march=native / AVX-512 on the runner), so the
+# shipped binary crashed with 0xc000001d ILLEGAL_INSTRUCTION on CPUs without AVX-512.
+# whisper-rs-sys forwards GGML_* env vars to CMake; OFF keeps a portable AVX2 baseline.
+env:
+  GGML_NATIVE: "OFF"
+
 jobs:
   build:
     strategy:
