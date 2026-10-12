@@ -1,0 +1,7 @@
+# ct2rs CMake-builds CTranslate2 with the static CRT (/MT); match it so local Windows
+# builds don't fail with LNK2038 "RuntimeLibrary mismatch". CI sets the same via RUSTFLAGS.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+CMAKE_TOOLCHAIN_FILE = { value = ".cargo/msvc-static-crt.cmake", relative = true }
