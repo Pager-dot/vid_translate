@@ -62,6 +62,15 @@ foreach ($dll in @("libvosk.dll", "libgcc_s_seh-1.dll", "libstdc++-6.dll", "libw
   Copy-Item $src $stage
 }
 
+# whisper.cpp's OpenMP build links VCOMP140.DLL, which ships with the Visual C++
+# Redistributable rather than Windows. Store certification fails an undisclosed dependency on
+# it (policy 10.2.4.1), so deploy it app-locally beside the exe, as the VC++ redist allows.
+$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+$vcomp = & $vswhere -latest -products * -find "VC\Redist\MSVC\**\x64\Microsoft.VC*.OpenMP\vcomp140.dll" |
+  Where-Object { $_ -notmatch "\\onecore\\|\\debug_nonredist\\" } | Select-Object -First 1
+if (-not $vcomp) { throw "vcomp140.dll not found in the Visual C++ redist directory" }
+Copy-Item $vcomp $stage
+
 # Reuse the icon set the Tauri bundler already generates from the app icon.
 $icons = Join-Path $repoRoot "src-tauri\icons"
 foreach ($logo in @("Square44x44Logo.png", "Square71x71Logo.png", "Square150x150Logo.png", "StoreLogo.png")) {
