@@ -7,8 +7,53 @@ Written to be self-contained. A session that reads this and `docs/bench-whisper.
 context; nothing important lives only in the chat it came from.
 
 Everything below is either a verified fact (with how it was verified) or an explicitly
-labelled expectation. **No performance measurement has been taken yet on any machine.**
-That is the next step and it cannot be done from a cloud container.
+labelled expectation. The first measurements were taken on 2026-10-17 on Windows (see
+**Results** directly below); the findings further down were written before them and are
+annotated where the numbers overturned them.
+
+---
+
+## Results — 2026-10-17, Windows, ThinkBook (i7-1255U, Iris Xe)
+
+**Outcome: Vulkan on the iGPU fixes the problem.** Shipped as the default for Windows and Linux
+(`whisper-rs` features `["openmp", "vulkan"]`); macOS keeps Metal.
+
+Setup: `ggml-small.bin`, `--translate` (JA mode), 10 s window, Silero VAD on, default threads
+(10), 20 s warmup + 40 s measure, Intel driver 32.0.101.7092 (Vulkan 1.4.323), mains power.
+Clip: 24 min Japanese family vlog, 16 kHz mono. Raw rows: `eval/ja/bench-2026-10-17.csv`
+(git-ignored).
+
+| Config | Load | Mean pass | p95 | `headroom_at_2s` | Overrun |
+|---|---|---|---|---|---|
+| CPU, 10 threads (previous release) | idle | 1988 ms | 2111 ms | 1.01 | 43% |
+| CPU, 4 threads | idle | 2533 ms | 3504 ms | 0.79 | 100% |
+| CPU, 10 threads | browser video | 2122 ms | 3141 ms | **0.94** | 32% |
+| **iGPU (Vulkan)** | idle | **658 ms** | 695 ms | **3.04** | 0% |
+| **iGPU (Vulkan)** | browser video | **667 ms** | 694 ms | **3.00** | 0% |
+| iGPU + flash attention | idle | 1197 ms | 1231 ms | 1.67 | 0% |
+
+What this settles:
+
+- **The reported symptom is reproduced:** the CPU build drops below 1.0 headroom as soon as a
+  video plays — it cannot keep up at any step.
+- **The iGPU is ~3x faster and does not care about the browser** (658 → 667 ms). The
+  compositor-contention worry under "Load contention" did not materialise for a 1080p YouTube
+  video; a heavier GPU load (games, multiple streams) is untested.
+- **Accuracy is unchanged.** `whisper_bench --transcribe 120` on GPU and `--no-gpu`: 11 of 12
+  windows byte-identical; the twelfth differs because CPU fell into a repetition loop and GPU
+  did not (float-order noise tipping greedy decoding — not a quality regression). Both share
+  the same errors against the reference translation, which belong to `small`, not the backend.
+
+How the toolchain had to be set up on Windows (all now handled — see README):
+
+- Run Cargo from `src-tauri`, or `.cargo/config.toml`'s static-CRT setting is skipped → `LNK2038`.
+- Vulkan SDK needed at build time (headers, `vulkan-1.lib`, `glslc`).
+- `CARGO_BUILD_BUILD_DIR` must be short: ggml-vulkan's nested `vulkan-shaders-gen` CMake build
+  hits MSBuild's 260-char path limit under `src-tauri\target` (266 chars here; 258 on GitHub
+  runners — no margin). The symptom is a misleading *"No CMAKE_C_COMPILER could be found"*.
+
+Not yet measured: Fedora (same silicon, Mesa ANV driver instead of Intel's), other models
+(`base-q5_1`, `medium` — the headroom now leaves room to try a *bigger* one), battery power.
 
 ---
 
@@ -73,6 +118,9 @@ additionally contend for the same vector units, which ggml already saturates.
 pinning whisper to the 8 E-cores (homogeneous, no SMT, no straggler) may beat using all
 cores. Free to test, possibly the largest easy win. **This is the first thing to measure.**
 
+> **Measured 2026-10-17 — not borne out on Windows.** 4 threads was *slower* than 10
+> (2533 vs 1988 ms). E-core pinning untested; moot now that whisper runs on the iGPU.
+
 ### 2. Model size is probably the biggest lever
 
 Default is `ggml-small.bin` (`lib.rs:118`); quantized variants are already supported
@@ -89,6 +137,9 @@ load, **that is the answer to the whole question** and no backend work is needed
 **Verified:** `flash_attn(bool)` exists and compiles on whisper-rs 0.16. No correctness
 tradeoff. The benchmark A/Bs it.
 
+> **Measured 2026-10-17 — wrong on the iGPU.** Flash attention nearly *doubles* the Vulkan
+> pass (658 → 1197 ms). Leave it off.
+
 ### 4. `GGML_AVX_VNNI` is unused
 
 `.github/workflows/release.yml:15` sets `GGML_NATIVE: "OFF"` for a portable AVX2 baseline —
@@ -97,6 +148,12 @@ accelerates the int8 dot products in the q5/q8 models. Needs a separate build or
 dispatch; enabling it unconditionally would crash pre-2021 CPUs.
 
 ### 5. Vulkan — real but blocked, and smaller than advertised
+
+> **Resolved 2026-10-17 — not blocked, and it is the fix.** The vendored whisper.cpp in
+> `whisper-rs-sys` 0.15.0 is **1.8.3** (`project("whisper.cpp" VERSION 1.8.3)` in its
+> `CMakeLists.txt`, and `GGML_BACKEND_DEVICE_TYPE_IGPU` accepted in `whisper.cpp`). On Iris Xe
+> it logs `using Vulkan0 backend` and measures ~3x the CPU — see **Results**. The text below
+> is the pre-measurement reasoning, kept for the record.
 
 **Do not start this work before checking one thing.** whisper.cpp only began *accepting*
 integrated GPUs as a backend in
@@ -164,7 +221,12 @@ scripts/bench-whisper.sh --audio eval/ja/clip01.wav --label browser-video --pres
 ```powershell
 # Windows — needs MSVC toolchain, CMake, VS Build Tools (C++); it builds whisper.cpp and
 # CTranslate2 from source. Affinity masks are opt-in: Windows publishes no hybrid split.
-cargo build --release --features eval --bin whisper_bench --manifest-path src-tauri\Cargo.toml
+# Build from inside src-tauri (its .cargo\config.toml sets the static CRT; --manifest-path from
+# the root skips it and linking fails with LNK2038), with a short build-dir (the Vulkan shader
+# generator's nested MSBuild paths otherwise exceed 260 chars). Needs the Vulkan SDK too.
+# bench-whisper.ps1 does all of this itself when the binary is missing.
+cd src-tauri; $env:CARGO_BUILD_BUILD_DIR = 'C:\vtb'
+cargo build --release --features eval --bin whisper_bench; cd ..
 powershell -ExecutionPolicy Bypass -File .\scripts\bench-whisper.ps1 `
     -Audio eval\ja\clip01.wav -Label idle -Preset quick -PCoreMask 0x00F -ECoreMask 0xFF0
 ```
@@ -197,6 +259,10 @@ badly is not an improvement.
 ---
 
 ## Next actions, in order
+
+> **Updated 2026-10-17:** steps 3–5 are done on Windows and Vulkan shipped. Remaining: run the
+> same matrix on Fedora (`scripts/bench-whisper.sh`), try a larger model now that there is
+> headroom, and confirm the first CI release with the Vulkan SDK step goes green.
 
 1. Run the two `--preset quick` passes on Fedora, idle and browser-video. ~5 min each.
 2. Read the thread-count and model-size columns. Findings 1 and 2 above are likely settled

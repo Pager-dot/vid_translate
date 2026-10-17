@@ -115,10 +115,24 @@ if (-not (Test-Path $bin)) {
   $missing = @()
   if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { $missing += "cargo (Rust, MSVC toolchain: rustup default stable-msvc)" }
   if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { $missing += "cmake (https://cmake.org/download/, or 'winget install Kitware.CMake')" }
-  if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
-    $missing += "cl.exe — the MSVC C++ compiler. Install Visual Studio Build Tools with the " +
-                "'Desktop development with C++' workload, then run this from a " +
-                "'Developer PowerShell for VS' so cl.exe is on PATH"
+  # cl.exe need not be on PATH: cmake-rs and cc locate MSVC through vswhere themselves.
+  $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+  $vc = if (Test-Path $vswhere) {
+    & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+  }
+  if (-not $vc) {
+    $missing += "MSVC C++ compiler. Install Visual Studio Build Tools with the " +
+                "'Desktop development with C++' workload"
+  }
+  # whisper.cpp's Vulkan backend needs the SDK's headers, loader lib and glslc to build.
+  # The installer sets VULKAN_SDK machine-wide, which a shell opened before it won't see.
+  if (-not $env:VULKAN_SDK) {
+    $env:VULKAN_SDK = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
+  }
+  if (-not $env:VULKAN_SDK -or -not (Test-Path "$env:VULKAN_SDK\Bin\glslc.exe")) {
+    $missing += "Vulkan SDK (https://vulkan.lunarg.com/sdk/home, or 'winget install KhronosGroup.VulkanSDK')"
+  } else {
+    $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
   }
   if ($missing.Count -gt 0) {
     Write-Host "`nCannot build — missing build prerequisites:" -ForegroundColor Yellow
@@ -127,7 +141,13 @@ if (-not (Test-Path $bin)) {
   }
 
   Write-Host "`nbuilding whisper_bench (release — a debug build measures the wrong thing)"
-  cargo build --release --features eval --bin whisper_bench --manifest-path src-tauri\Cargo.toml
+  # Run from src-tauri: Cargo reads .cargo\config.toml relative to the working directory, not
+  # --manifest-path, and that file sets the static CRT this link depends on (LNK2038 without).
+  # Short build-dir: the Vulkan shader generator's nested MSBuild paths exceed 260 chars under
+  # src-tauri\target. Final binaries still land in src-tauri\target\release.
+  if (-not $env:CARGO_BUILD_BUILD_DIR) { $env:CARGO_BUILD_BUILD_DIR = 'C:\vtb' }
+  Push-Location src-tauri
+  try { cargo build --release --features eval --bin whisper_bench } finally { Pop-Location }
   if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 

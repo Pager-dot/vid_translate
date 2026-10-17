@@ -282,7 +282,14 @@ pub fn preload(path: &str) -> Result<Arc<WhisperContext>, String> {
     // again.
     guard.clear();
     let load_start = std::time::Instant::now();
-    let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+    // GPU is the default (Metal on macOS, Vulkan elsewhere) and ggml falls back to the CPU when
+    // no device is usable. VID_TRANSLATE_NO_GPU=1 forces the CPU — the escape hatch for a GPU
+    // driver that enumerates fine and then crashes or produces garbage.
+    let mut params = WhisperContextParameters::default();
+    let use_gpu = std::env::var_os("VID_TRANSLATE_NO_GPU").is_none();
+    params.use_gpu(use_gpu);
+    eprintln!("[whisper] use_gpu={use_gpu}");
+    let ctx = WhisperContext::new_with_params(path, params)
         .map_err(|e| format!("failed to load Whisper model at {path}: {e}"))?;
     eprintln!("[whisper] model loaded in {:.1?}", load_start.elapsed());
     let ctx = Arc::new(ctx);

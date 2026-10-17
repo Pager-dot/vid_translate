@@ -80,6 +80,8 @@ struct Config {
     translate: bool,
     label: String,
     csv_header: bool,
+    gpu: bool,
+    transcribe_s: Option<u64>,
 }
 
 fn usage() -> String {
@@ -98,6 +100,7 @@ Shape of the pass:
   --flash-attn          enable flash attention on the context
   --lang <code>         language hint                    [default: ja]
   --translate           Whisper's translate task (what JA mode runs)
+  --no-gpu              keep whisper on the CPU (A/B against Vulkan/Metal)
 
 Timing:
   --warmup-ms <ms>      discarded before measuring       [default: 60000]
@@ -107,6 +110,8 @@ Output:
   --label <text>        free-form tag copied into the row (e.g. \"browser-video\")
   --csv-header          print the header line before the row
   --print-header        print only the CSV header and exit (no model needed)
+  --transcribe <secs>   instead of timing, print the text of the first <secs> of the
+                        clip in consecutive windows (CPU/GPU accuracy spot-check)
 "
     .to_string()
 }
@@ -135,6 +140,8 @@ fn parse_args() -> Result<Config, String> {
         translate: true,
         label: String::new(),
         csv_header: false,
+        gpu: true,
+        transcribe_s: None,
     };
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -206,6 +213,14 @@ fn parse_args() -> Result<Config, String> {
             "--no-translate" => {
                 cfg.translate = false;
                 i += 1;
+            }
+            "--no-gpu" => {
+                cfg.gpu = false;
+                i += 1;
+            }
+            "--transcribe" => {
+                cfg.transcribe_s = Some(num(next(i, "--transcribe")?, "--transcribe")?);
+                i += 2;
             }
             "--csv-header" => {
                 cfg.csv_header = true;
@@ -479,6 +494,7 @@ fn main() {
     // an A/B.
     let mut ctx_params = WhisperContextParameters::default();
     ctx_params.flash_attn(cfg.flash_attn);
+    ctx_params.use_gpu(cfg.gpu);
     let load_start = Instant::now();
     let ctx = match WhisperContext::new_with_params(&cfg.model, ctx_params) {
         Ok(c) => c,
@@ -495,6 +511,49 @@ fn main() {
         }
     };
     eprintln!("[bench] model loaded in {:.1?}", load_start.elapsed());
+
+    // Accuracy spot-check rather than timing: decode the clip's opening in consecutive
+    // windows with the timed pass's parameters, so `--no-gpu` and the default can be diffed
+    // against each other and a reference transcript. A faster backend that changes the text
+    // is not a win.
+    if let Some(secs) = cfg.transcribe_s {
+        let step = ms_to_samples(cfg.window_ms);
+        let end = clip.len().min(secs as usize * SAMPLE_RATE);
+        let mut start = 0;
+        while start < end {
+            let chunk = &clip[start..(start + step).min(end)];
+            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params.set_language(Some(&cfg.lang));
+            params.set_translate(cfg.translate);
+            params.set_no_context(true);
+            params.set_suppress_nst(true);
+            params.set_temperature(0.0);
+            params.set_temperature_inc(0.0);
+            params.set_no_speech_thold(0.6);
+            params.set_logprob_thold(-1.0);
+            params.set_n_threads(cfg.threads);
+            params.set_audio_ctx(audio_ctx_for(chunk.len()));
+            params.set_print_special(false);
+            params.set_print_progress(false);
+            params.set_print_realtime(false);
+            params.set_print_timestamps(false);
+            if let Err(e) = state.full(params, chunk) {
+                eprintln!("[bench] inference failed: {e}");
+                std::process::exit(1);
+            }
+            let mut text = String::new();
+            for i in 0..state.full_n_segments() {
+                if let Some(Ok(t)) = state.get_segment(i).map(|s| s.to_str_lossy()) {
+                    text.push_str(t.trim());
+                    text.push(' ');
+                }
+            }
+            let s = start / SAMPLE_RATE;
+            println!("[{:02}:{:02}] {}", s / 60, s % 60, text.trim());
+            start += step;
+        }
+        return;
+    }
 
     // The speech gate, on the same terms as the app: weights beside the model, absent is a
     // warning not an error. Benchmarked because the recognizer times gate+decode together —

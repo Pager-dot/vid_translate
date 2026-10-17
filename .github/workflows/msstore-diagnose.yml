@@ -46,12 +46,32 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # whisper-rs builds ggml's Vulkan backend on Linux/Windows (see src-tauri/Cargo.toml),
+      # which needs the Vulkan headers, loader import library and glslc at compile time.
+      - name: Install Vulkan SDK
+        if: ${{ !startsWith(matrix.platform || 'windows', 'macos') }}
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: latest
+          install_runtime: true
+          cache: true
+          stripdown: true
+
       # Own cache key: this run must compile ggml from scratch, or the diagnostics would
       # describe a cached build instead of what this runner produces.
+      # whisper.cpp's Vulkan backend builds its shader generator as a nested CMake project,
+      # whose MSBuild file-tracking paths exceed Windows' 260-char limit under
+      # src-tauri/target (266 chars locally, 258 on runners, with no margin). Cargo's
+      # build-dir moves intermediates to a short root; final binaries stay in target/.
+      - name: Shorten Cargo build-dir (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "CARGO_BUILD_BUILD_DIR=C:/b" >> "$GITHUB_ENV"
+
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: ggml-diagnose-2
+          key: ggml-diagnose-vulkan-1
 
       - run: npm ci
 
@@ -69,15 +89,15 @@ jobs:
           cmake --version | head -1
           cl 2>&1 | head -1 || true
           echo "::endgroup::"
-          for c in src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
+          for c in "${CARGO_BUILD_BUILD_DIR:-src-tauri/target}"/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
             echo "::group::$c"
             grep -E '^(GGML_|CMAKE_GENERATOR|CMAKE_C_COMPILER|CMAKE_(C|CXX)_FLAGS|CMAKE_MSVC_RUNTIME|OpenMP_)' "$c" | sort
             echo "::endgroup::"
           done
           echo "::group::ggml-cpu compile flags"
           grep -rhoE '/arch:[A-Z0-9.]+|GGML_(AVX|AVX2|FMA|F16C|BMI2|AVX512)[A-Z0-9_]*' \
-            src-tauri/target/release/build/whisper-rs-sys-*/out/build/ggml/src/ggml-cpu.vcxproj \
-            src-tauri/target/release/build/whisper-rs-sys-*/out/build/ggml/src/ggml-cpu/*.vcxproj 2>/dev/null | sort | uniq -c || true
+            "${CARGO_BUILD_BUILD_DIR:-src-tauri/target}"/release/build/whisper-rs-sys-*/out/build/ggml/src/ggml-cpu.vcxproj \
+            "${CARGO_BUILD_BUILD_DIR:-src-tauri/target}"/release/build/whisper-rs-sys-*/out/build/ggml/src/ggml-cpu/*.vcxproj 2>/dev/null | sort | uniq -c || true
           echo "::endgroup::"
           od="/c/Program Files/LLVM/bin/llvm-objdump.exe"
           if [ -x "$od" ]; then
@@ -86,9 +106,9 @@ jobs:
             echo "zmm: $(grep -c zmm dis.txt)  vfmadd-ymm: $(grep -cE 'vfmadd...ps.*ymm' dis.txt)  vcvtph2ps: $(grep -c vcvtph2ps dis.txt)"
           fi
           # Fail loudly rather than ship a build that runs whisper without AVX2.
-          grep -q '^GGML_AVX2:BOOL=ON' src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt \
+          grep -q '^GGML_AVX2:BOOL=ON' "${CARGO_BUILD_BUILD_DIR:-src-tauri/target}"/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt \
             || { echo "::error::ggml was configured without AVX2"; exit 1; }
-          grep -qE '^CMAKE_C_FLAGS_RELEASE:STRING=.*[/-]O2' src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt \
+          grep -qE '^CMAKE_C_FLAGS_RELEASE:STRING=.*[/-]O2' "${CARGO_BUILD_BUILD_DIR:-src-tauri/target}"/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt \
             || { echo "::error::ggml Release flags have no /O2 (unoptimised build)"; exit 1; }
 
       - name: Pack MSIX

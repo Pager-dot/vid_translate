@@ -59,13 +59,33 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # whisper-rs builds ggml's Vulkan backend on Linux/Windows (see src-tauri/Cargo.toml),
+      # which needs the Vulkan headers, loader import library and glslc at compile time.
+      - name: Install Vulkan SDK
+        if: ${{ !startsWith(matrix.platform || 'windows', 'macos') }}
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: latest
+          install_runtime: true
+          cache: true
+          stripdown: true
+
+      # whisper.cpp's Vulkan backend builds its shader generator as a nested CMake project,
+      # whose MSBuild file-tracking paths exceed Windows' 260-char limit under
+      # src-tauri/target (266 chars locally, 258 on runners, with no margin). Cargo's
+      # build-dir moves intermediates to a short root; final binaries stay in target/.
+      - name: Shorten Cargo build-dir (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "CARGO_BUILD_BUILD_DIR=C:/b" >> "$GITHUB_ENV"
+
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           # whisper-rs-sys doesn't rerun its build script when GGML_* env vars change, so a
           # restored cache keeps whatever ggml was compiled before. Bump this key whenever
           # GGML_* settings change, or the old build (e.g. AVX-512 from -march=native) ships.
-          key: ggml-opt-1
+          key: ggml-vulkan-1
 
       - run: npm ci
 
@@ -164,8 +184,8 @@ jobs:
         shell: bash
         run: |
           cmake --version | head -1
-          grep -hE '^(GGML_|CMAKE_GENERATOR|CMAKE_C_COMPILER|CMAKE_(C|CXX)_FLAGS|OpenMP_)' src-tauri/target/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt | sort -u
-          grep -rhoE '/arch:[A-Z0-9.]+' src-tauri/target/release/build/whisper-rs-sys-*/out/build/ggml/src/ 2>/dev/null | sort | uniq -c
+          grep -hE '^(GGML_|CMAKE_GENERATOR|CMAKE_C_COMPILER|CMAKE_(C|CXX)_FLAGS|OpenMP_)' "${CARGO_BUILD_BUILD_DIR:-src-tauri/target}"/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt | sort -u
+          grep -rhoE '/arch:[A-Z0-9.]+' "${CARGO_BUILD_BUILD_DIR:-src-tauri/target}"/release/build/whisper-rs-sys-*/out/build/ggml/src/ 2>/dev/null | sort | uniq -c
 
       # linuxdeploy bundles the build machine's libwayland-client, but libEGL is NOT
       # bundled — so the *host's* Mesa gets force-linked against Ubuntu 22.04's old
