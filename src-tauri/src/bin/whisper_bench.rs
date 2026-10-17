@@ -480,7 +480,7 @@ fn main() {
     let mut ctx_params = WhisperContextParameters::default();
     ctx_params.flash_attn(cfg.flash_attn);
     let load_start = Instant::now();
-    let ctx = match WhisperContext::new_with_params(&cfg.model.to_string_lossy(), ctx_params) {
+    let ctx = match WhisperContext::new_with_params(&cfg.model, ctx_params) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[bench] failed to load {}: {e}", cfg.model.display());
