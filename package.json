@@ -8,7 +8,7 @@
     "dev:macos": "bash scripts/dev-macos.sh",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
+    "tauri": "node scripts/tauri.mjs",
     "version:set": "node scripts/bump-version.mjs"
   },
   "dependencies": {

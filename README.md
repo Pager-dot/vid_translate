@@ -243,14 +243,14 @@ rebuild, because ad-hoc signatures change every time.
 
 - First compile takes **5–15 minutes** (builds the Vosk bindings, whisper.cpp and CTranslate2). Later builds are fast.
 - The frontend hot-reloads; Rust changes trigger a rebuild.
-- **Windows: set a short Cargo build directory first**, or the first build fails deep inside
-  whisper.cpp with *"No CMAKE_C_COMPILER could be found"*. The Vulkan backend's shader
-  generator is a nested CMake build whose paths pass Windows' 260-character limit under
-  `src-tauri\target`, and MSBuild cannot use long paths. Intermediates move; the app and
-  installers still land in `src-tauri\target\release`:
-  ```powershell
-  setx CARGO_BUILD_BUILD_DIR C:\vtb   # once; open a new terminal afterwards
-  ```
+- **Windows: always go through `npm run tauri …`**, never a bare `tauri` / `cargo` command
+  from `src-tauri`, or the first build fails deep inside whisper.cpp with *"No
+  CMAKE_C_COMPILER could be found"*. The Vulkan backend's shader generator is a nested CMake
+  build whose paths pass Windows' 260-character limit under `src-tauri\target`, and MSBuild
+  cannot use long paths. `scripts/tauri.mjs` (what `npm run tauri` runs) sets
+  `CARGO_BUILD_BUILD_DIR=C:\vtb` on Windows to fix this, unless you've already set it.
+  Intermediates move; the app and installers still land in `src-tauri\target\release`. To call
+  Cargo directly, set it yourself first: `setx CARGO_BUILD_BUILD_DIR C:\vtb`.
 - **Windows: run Cargo from `src-tauri`** (`npm run tauri …` already does). Its
   `.cargo\config.toml` selects the static C runtime; `cargo --manifest-path` from the repo root
   skips that file and linking fails with `LNK2038` / `LNK1169`.
@@ -348,11 +348,11 @@ chmod +x src-tauri/target/release/bundle/appimage/VidTranslate_0.0.6_amd64.AppIm
 ### 🪟 Windows
 
 On a Windows machine with the [prerequisites](#prerequisites) installed (Rust, Node, the C++
-toolchain, CMake and the Vulkan SDK) and `CARGO_BUILD_BUILD_DIR` set as described above:
+toolchain, CMake and the Vulkan SDK):
 
 ```powershell
 cd vid_translate
-npx tauri build
+npm run tauri build   # not `npx tauri build`: the npm script applies the path-length fix
 ```
 
 This produces an `.msi` / NSIS installer under:

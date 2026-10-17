@@ -48,7 +48,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use vid_translate_lib::recognizer::whisper::{audio_ctx_for, VAD_MODEL_FILE};
+use vid_translate_lib::recognizer::whisper::{audio_ctx_for, max_tokens_for, VAD_MODEL_FILE};
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadContext,
     WhisperVadContextParams, WhisperVadParams,
@@ -512,6 +512,34 @@ fn main() {
     };
     eprintln!("[bench] model loaded in {:.1?}", load_start.elapsed());
 
+    // First-pass cost per audio_ctx: the app derives audio_ctx from each window's length, so
+    // in a live session it keeps meeting sizes it has never run. Each window length is run
+    // twice in one process — `first` vs `again` shows what a never-seen size costs on this
+    // backend, which the fixed-window timing loop below never exercises.
+    if std::env::var_os("WHISPER_BENCH_CTX_SWEEP").is_some() {
+        eprintln!("window_s,audio_ctx,first_ms,again_ms");
+        for secs in (2..=20).step_by(2) {
+            let n = (secs * SAMPLE_RATE).min(clip.len());
+            let chunk = &clip[..n];
+            let mut times = [0.0f64; 2];
+            for t in times.iter_mut() {
+                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                params.set_language(Some(&cfg.lang));
+                params.set_translate(cfg.translate);
+                params.set_no_context(true);
+                params.set_n_threads(cfg.threads);
+                params.set_audio_ctx(audio_ctx_for(chunk.len()));
+                params.set_print_progress(false);
+                params.set_print_realtime(false);
+                let start = Instant::now();
+                state.full(params, chunk).expect("inference failed");
+                *t = start.elapsed().as_secs_f64() * 1000.0;
+            }
+            eprintln!("{secs},{},{:.0},{:.0}", audio_ctx_for(chunk.len()), times[0], times[1]);
+        }
+        return;
+    }
+
     // Accuracy spot-check rather than timing: decode the clip's opening in consecutive
     // windows with the timed pass's parameters, so `--no-gpu` and the default can be diffed
     // against each other and a reference transcript. A faster backend that changes the text
@@ -533,6 +561,7 @@ fn main() {
             params.set_logprob_thold(-1.0);
             params.set_n_threads(cfg.threads);
             params.set_audio_ctx(audio_ctx_for(chunk.len()));
+            params.set_max_tokens(max_tokens_for(chunk.len()));
             params.set_print_special(false);
             params.set_print_progress(false);
             params.set_print_realtime(false);
@@ -616,6 +645,7 @@ fn main() {
         params.set_logprob_thold(-1.0);
         params.set_n_threads(cfg.threads);
         params.set_audio_ctx(audio_ctx);
+        params.set_max_tokens(max_tokens_for(window.len()));
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);

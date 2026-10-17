@@ -262,6 +262,26 @@ pub fn audio_ctx_for(samples: usize) -> i32 {
     tokens.clamp(320, AUDIO_CTX_FULL)
 }
 
+/// Most tokens one pass may decode for a window of `samples`.
+///
+/// Without a cap a pass that falls into a repetition loop ("the number of the number of the
+/// number of…") decodes until whisper.cpp's own ceiling of 220 tokens. Every token is one
+/// more decoder step, so that one pass costs ~10x a normal one — measured at 5.3s on an
+/// Iris Xe for 4s of audio, and the 10–14s stalls seen before that. A pass that outlives the
+/// step makes the window grow, which makes the next pass slower still, and the session ends
+/// up dropping tens of seconds of audio.
+///
+/// Real speech stays far below this: fast English runs ~4 text tokens/s, plus two timestamp
+/// tokens per segment. 10 per second plus 16 of headroom leaves 2x on top of that while
+/// cutting a runaway off at about a quarter of the old cost. A pass that reaches the cap is
+/// treated as a loop and its cut-off segment is dropped (see `run`).
+///
+/// `pub` for `bin/whisper_bench.rs`, for the same reason as `audio_ctx_for`.
+pub fn max_tokens_for(samples: usize) -> i32 {
+    let secs = samples as f32 / SAMPLE_RATE as f32;
+    ((secs * 10.0).ceil() as i32 + 16).clamp(32, 220)
+}
+
 static LOADED: OnceLock<Mutex<HashMap<String, Arc<WhisperContext>>>> = OnceLock::new();
 
 /// Returns the model for `path`, loading it only the first time.
@@ -518,6 +538,9 @@ where
         params.set_n_threads(threads);
         // Encode the audio that is there, not the 30s of padding around it.
         params.set_audio_ctx(audio_ctx_for(window.len()));
+        // Bounds the cost of a repetition loop; see `max_tokens_for`.
+        let max_tokens = max_tokens_for(window.len());
+        params.set_max_tokens(max_tokens);
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -568,8 +591,21 @@ where
             );
         }
 
-        let n = state.full_n_segments();
+        let mut n = state.full_n_segments();
         let window_end_cs = (window.len() * 100 / SAMPLE_RATE) as i64;
+
+        // A pass that used its whole token budget was cut off mid-loop. The last segment is
+        // the one the cap truncated — repetition, not speech — so it is neither shown nor
+        // committed. Earlier segments decoded normally before the loop began and are kept.
+        let decoded: i32 = (0..n).filter_map(|i| state.get_segment(i)).map(|s| s.n_tokens()).sum();
+        if n > 0 && decoded >= max_tokens {
+            if let Some(Ok(t)) = state.get_segment(n - 1).map(|s| s.to_str_lossy()) {
+                let t = t.trim();
+                let preview: String = t.chars().take(60).collect();
+                eprintln!("[whisper] hit the {max_tokens}-token cap, dropped looping segment: {preview:?}…");
+            }
+            n -= 1;
+        }
 
         // Walk the segments in order, committing the ones the speaker has moved past.
         let force_commit = window.len() >= ms_to_samples(MAX_WINDOW_MS);
@@ -690,6 +726,7 @@ where
         params.set_no_context(true);
         params.set_n_threads(threads);
         params.set_audio_ctx(audio_ctx_for(window.len()));
+        params.set_max_tokens(max_tokens_for(window.len()));
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -847,6 +884,15 @@ mod tests {
         ] {
             assert!(!is_hallucinated(s), "should have been kept: {s:?}");
         }
+    }
+
+    #[test]
+    fn token_cap_scales_with_window_and_stays_below_whisper_ceiling() {
+        // 4s of audio: room for fast speech (~4 tokens/s), far below a 220-token loop.
+        assert_eq!(max_tokens_for(4 * SAMPLE_RATE), 56);
+        // Tiny windows still get a usable floor; the longest window never exceeds whisper's own.
+        assert_eq!(max_tokens_for(SAMPLE_RATE / 2), 32);
+        assert_eq!(max_tokens_for(30 * SAMPLE_RATE), 220);
     }
 
     #[test]
