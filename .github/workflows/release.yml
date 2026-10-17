@@ -37,6 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libvulkan-dev: on Linux whisper-rs-sys links plain `-lvulkan` with no search path
+      # (unlike Windows, it ignores VULKAN_SDK), so the loader's .so must be in the system
+      # library dirs. The Vulkan SDK step below still supplies glslc and headers.
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -48,6 +51,7 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libvulkan-dev \
             patchelf \
             file \
             squashfs-tools
