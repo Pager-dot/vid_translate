@@ -31,6 +31,12 @@ name = "ja_eval"
 path = "src/bin/ja_eval.rs"
 required-features = ["eval"]
 
+# Same gate, same reason: a dev-only measurement tool that must not land in the bundle.
+[[bin]]
+name = "whisper_bench"
+path = "src/bin/whisper_bench.rs"
+required-features = ["eval"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -239,7 +239,11 @@ const AUDIO_CTX_FULL: i32 = 1500;
 /// past the audio it is describing, and cutting too close truncates the last word or sends
 /// the decoder looking for text in padding it cannot see. `clamp` to `AUDIO_CTX_FULL` means
 /// a full-length window is simply the old behaviour.
-fn audio_ctx_for(samples: usize) -> i32 {
+///
+/// `pub` for `bin/whisper_bench.rs`, which has to derive the cap exactly as the recognizer
+/// does: a benchmark that computed its own `audio_ctx` would be measuring a pass the app
+/// never runs.
+pub fn audio_ctx_for(samples: usize) -> i32 {
     // An escape hatch, and the knob the A/B above was measured with:
     // VID_TRANSLATE_WHISPER_FULL_AUDIO_CTX=1 restores the full mel window, so a quality
     // regression blamed on this can be confirmed or cleared in one run rather than argued
