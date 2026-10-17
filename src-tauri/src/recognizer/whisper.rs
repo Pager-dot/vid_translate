@@ -239,7 +239,11 @@ const AUDIO_CTX_FULL: i32 = 1500;
 /// past the audio it is describing, and cutting too close truncates the last word or sends
 /// the decoder looking for text in padding it cannot see. `clamp` to `AUDIO_CTX_FULL` means
 /// a full-length window is simply the old behaviour.
-fn audio_ctx_for(samples: usize) -> i32 {
+///
+/// `pub` for `bin/whisper_bench.rs`, which has to derive the cap exactly as the recognizer
+/// does: a benchmark that computed its own `audio_ctx` would be measuring a pass the app
+/// never runs.
+pub fn audio_ctx_for(samples: usize) -> i32 {
     // An escape hatch, and the knob the A/B above was measured with:
     // VID_TRANSLATE_WHISPER_FULL_AUDIO_CTX=1 restores the full mel window, so a quality
     // regression blamed on this can be confirmed or cleared in one run rather than argued
@@ -278,7 +282,14 @@ pub fn preload(path: &str) -> Result<Arc<WhisperContext>, String> {
     // again.
     guard.clear();
     let load_start = std::time::Instant::now();
-    let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+    // GPU is the default (Metal on macOS, Vulkan elsewhere) and ggml falls back to the CPU when
+    // no device is usable. VID_TRANSLATE_NO_GPU=1 forces the CPU — the escape hatch for a GPU
+    // driver that enumerates fine and then crashes or produces garbage.
+    let mut params = WhisperContextParameters::default();
+    let use_gpu = std::env::var_os("VID_TRANSLATE_NO_GPU").is_none();
+    params.use_gpu(use_gpu);
+    eprintln!("[whisper] use_gpu={use_gpu}");
+    let ctx = WhisperContext::new_with_params(path, params)
         .map_err(|e| format!("failed to load Whisper model at {path}: {e}"))?;
     eprintln!("[whisper] model loaded in {:.1?}", load_start.elapsed());
     let ctx = Arc::new(ctx);

@@ -31,6 +31,12 @@ name = "ja_eval"
 path = "src/bin/ja_eval.rs"
 required-features = ["eval"]
 
+# Same gate, same reason: a dev-only measurement tool that must not land in the bundle.
+[[bin]]
+name = "whisper_bench"
+path = "src/bin/whisper_bench.rs"
+required-features = ["eval"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -58,8 +64,13 @@ whisper-rs = "0.16.0"
 
 # No Metal here, so OpenMP is the only thing keeping whisper.cpp multi-threaded. Without it
 # ggml builds single-threaded and a pass cannot finish inside the 2s step.
+#
+# Vulkan puts the encoder on whatever GPU the machine has — discrete or integrated. The
+# vendored whisper.cpp (1.8.3) accepts iGPUs; older versions enumerated them and silently fell
+# back to CPU. With no usable device ggml runs on the CPU as before. Building needs the Vulkan
+# SDK (headers + glslc); running needs the Vulkan loader, which every GPU driver installs.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-whisper-rs = { version = "0.16.0", features = ["openmp"] }
+whisper-rs = { version = "0.16.0", features = ["openmp", "vulkan"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.23"

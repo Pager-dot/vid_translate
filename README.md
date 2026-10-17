@@ -39,6 +39,9 @@ default, and stays out of your way.
 - 🎨 Settings console: translation, speech, appearance and layout
 - 🖥️ Linux (PulseAudio/PipeWire), Windows (WASAPI loopback), macOS (Core Audio process
   tap — driverless)
+- 🎮 Whisper runs on the GPU everywhere: Metal on macOS, **Vulkan** on Windows and Linux —
+  integrated GPUs included (Intel Iris Xe, AMD Radeon iGPUs). No usable GPU → it falls back
+  to the CPU on its own. Set `VID_TRANSLATE_NO_GPU=1` to force the CPU
 
 ---
 
@@ -217,6 +220,8 @@ accuracy loss.
 | **Node.js** ≥ 18 + npm | Frontend tooling |
 | **Rust** (stable) + Cargo | Install via [rustup](https://rustup.rs) |
 | **Tauri v2 system deps** | Linux: `webkit2gtk-4.1`, `libappindicator`, etc. — see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). macOS: Xcode Command Line Tools + CMake (`brew install cmake`) |
+| **Vulkan SDK (Linux / Windows)** | Whisper's GPU backend. Windows: `winget install KhronosGroup.VulkanSDK`, then open a new terminal. Fedora: `sudo dnf install vulkan-headers vulkan-loader-devel glslc`. Ubuntu/Debian: `sudo apt install libvulkan-dev glslc`. Build-time only — users of the installed app need nothing beyond their normal GPU driver |
+| **C++ toolchain + CMake (Windows)** | Visual Studio Build Tools with *Desktop development with C++*, and CMake (`winget install Kitware.CMake`) — whisper.cpp and CTranslate2 are compiled from source |
 | **libvosk (macOS only)** | `bash scripts/fetch-libvosk-macos.sh` once before the first build |
 | **Ollama** *(optional)* | Only for Ollama-backed translation; the offline CTranslate2 path needs nothing — [ollama.com/download](https://ollama.com/download) |
 
@@ -238,6 +243,17 @@ rebuild, because ad-hoc signatures change every time.
 
 - First compile takes **5–15 minutes** (builds the Vosk bindings, whisper.cpp and CTranslate2). Later builds are fast.
 - The frontend hot-reloads; Rust changes trigger a rebuild.
+- **Windows: set a short Cargo build directory first**, or the first build fails deep inside
+  whisper.cpp with *"No CMAKE_C_COMPILER could be found"*. The Vulkan backend's shader
+  generator is a nested CMake build whose paths pass Windows' 260-character limit under
+  `src-tauri\target`, and MSBuild cannot use long paths. Intermediates move; the app and
+  installers still land in `src-tauri\target\release`:
+  ```powershell
+  setx CARGO_BUILD_BUILD_DIR C:\vtb   # once; open a new terminal afterwards
+  ```
+- **Windows: run Cargo from `src-tauri`** (`npm run tauri …` already does). Its
+  `.cargo\config.toml` selects the static C runtime; `cargo --manifest-path` from the repo root
+  skips that file and linking fails with `LNK2038` / `LNK1169`.
 
 ---
 
@@ -331,7 +347,8 @@ chmod +x src-tauri/target/release/bundle/appimage/VidTranslate_0.0.6_amd64.AppIm
 
 ### 🪟 Windows
 
-On a Windows machine with Rust + Node installed:
+On a Windows machine with the [prerequisites](#prerequisites) installed (Rust, Node, the C++
+toolchain, CMake and the Vulkan SDK) and `CARGO_BUILD_BUILD_DIR` set as described above:
 
 ```powershell
 cd vid_translate
