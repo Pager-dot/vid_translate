@@ -16,6 +16,8 @@
 # Usage:
 #   .\scripts\bench-whisper.ps1 -Audio eval\ja\clip01.wav -Label idle
 #   .\scripts\bench-whisper.ps1 -Audio eval\ja\clip01.wav -Label browser-video -Preset full
+#   .\scripts\bench-whisper.ps1 -Audio eval\ja\clip01.wav -Label idle `
+#       -PCoreMask 0x00F -ECoreMask 0xFF0        # i7-1255U: 2 P-cores + 8 E-cores
 
 [CmdletBinding()]
 param(
@@ -27,7 +29,11 @@ param(
   [int]$WarmupMs = 0,
   [int]$MeasureMs = 0,
   [switch]$DryRun,
-  [switch]$Yes
+  [switch]$Yes,
+  # Hex bitmasks, e.g. "0x00F". Opt-in because Windows publishes no hybrid-CPU split; see
+  # the comment at $affinitySets.
+  [string]$PCoreMask = "",
+  [string]$ECoreMask = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,19 +67,29 @@ if ($Preset -eq "quick") {
 }
 $flashSet = @($false, $true)
 
-# Affinity sets as name -> bitmask. Windows gives no published P/E split, so unlike the
-# Linux script this cannot be detected; these are the Alder Lake-U layout (2 P-cores with
-# SMT on CPUs 0-3, 8 E-cores on CPUs 4-11) and are WRONG on any other topology. Override
-# them for a different machine rather than trusting them.
+# Affinity sets as name -> bitmask.
+#
+# Windows publishes no P/E split the way Linux does under /sys/devices/system/cpu/types,
+# and there is no safe way to guess one: a 6-core/12-thread desktop with no E-cores at all
+# has the same ProcessorCount as a 2P+8E Alder Lake-U laptop. Inferring from the count
+# would label rows "pcores"/"ecores" on a CPU that has neither, which is worse than not
+# sweeping affinity — a benchmark that silently mislabels its rows is the exact failure
+# this harness exists to prevent.
+#
+# So affinity masks are opt-in and explicit. Find them with Task Manager (Performance tab,
+# right-click the graph, Change graph to > Logical processors) or CoreInfo, then pass the
+# bitmasks. For the i7-1255U layout (2 P-cores with SMT on CPUs 0-3, 8 E-cores on 4-11):
+#
+#   -PCoreMask 0x00F -ECoreMask 0xFF0
 $affinitySets = @(
   @{ Name = "all"; Mask = $null }
 )
-if ($nproc -eq 12) {
-  $affinitySets += @{ Name = "pcores-0_3"; Mask = [IntPtr]0x00F }   # CPUs 0-3
-  $affinitySets += @{ Name = "ecores-4_11"; Mask = [IntPtr]0xFF0 }  # CPUs 4-11
-} else {
-  Write-Host "note: $nproc CPUs — the hardcoded P/E masks assume a 12-thread Alder Lake-U."
-  Write-Host "      Sweeping 'all' only. Edit `$affinitySets for this machine."
+if ($PCoreMask) { $affinitySets += @{ Name = "pcores-$PCoreMask"; Mask = [IntPtr][Convert]::ToInt64($PCoreMask, 16) } }
+if ($ECoreMask) { $affinitySets += @{ Name = "ecores-$ECoreMask"; Mask = [IntPtr][Convert]::ToInt64($ECoreMask, 16) } }
+if (-not $PCoreMask -and -not $ECoreMask) {
+  Write-Host "note: sweeping 'all' CPUs only. On a hybrid CPU the P/E split is usually the"
+  Write-Host "      most interesting dimension — pass -PCoreMask / -ECoreMask to sweep it."
+  Write-Host "      For an i7-1255U: -PCoreMask 0x00F -ECoreMask 0xFF0"
 }
 
 $bin = "src-tauri\target\release\whisper_bench.exe"

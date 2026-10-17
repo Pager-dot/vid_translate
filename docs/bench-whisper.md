@@ -110,10 +110,18 @@ whole pass while the P-core threads idle at the barrier. Expect the optimum to b
 `nproc - 2`, and expect `ecores` (8 homogeneous cores, no SMT, no straggler) to compete with
 or beat `all`.
 
-The script detects the P/E split from `/sys/devices/system/cpu/types/` rather than
-hardcoding it. The Windows script **cannot** — Windows publishes no equivalent, so the masks
-there are hardcoded for the Alder Lake-U layout and are wrong on any other machine. Edit
-`$affinitySets` before trusting a Windows run on different hardware.
+The Linux script detects the P/E split from `/sys/devices/system/cpu/types/`. The Windows
+script **cannot** — Windows publishes no equivalent, and the logical-processor count alone
+cannot distinguish a 2P+8E laptop from a 6-core/12-thread desktop with no E-cores. So on
+Windows the masks are explicit opt-in:
+
+```powershell
+.\scripts\bench-whisper.ps1 -Audio clip.wav -Label idle -PCoreMask 0x00F -ECoreMask 0xFF0
+```
+
+Find the masks in Task Manager (Performance > right-click the graph > Change graph to >
+Logical processors) or with CoreInfo. Without them the Windows run sweeps `all` only, which
+is honest; guessing would label rows `pcores`/`ecores` on a CPU that has neither.
 
 ### Model size — probably the biggest lever
 
