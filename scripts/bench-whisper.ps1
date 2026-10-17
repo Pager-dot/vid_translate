@@ -109,6 +109,23 @@ Write-Host "  out:       $Out"
 if ($DryRun) { Write-Host "`n(-DryRun: nothing executed)"; exit 0 }
 
 if (-not (Test-Path $bin)) {
+  # Checked before the build rather than after: this compiles whisper.cpp and CTranslate2
+  # from source, so a missing toolchain surfaces as a CMake error several minutes in, in a
+  # log that does not name the real problem. The README's "Rust + Node" is not enough here.
+  $missing = @()
+  if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { $missing += "cargo (Rust, MSVC toolchain: rustup default stable-msvc)" }
+  if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { $missing += "cmake (https://cmake.org/download/, or 'winget install Kitware.CMake')" }
+  if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
+    $missing += "cl.exe — the MSVC C++ compiler. Install Visual Studio Build Tools with the " +
+                "'Desktop development with C++' workload, then run this from a " +
+                "'Developer PowerShell for VS' so cl.exe is on PATH"
+  }
+  if ($missing.Count -gt 0) {
+    Write-Host "`nCannot build — missing build prerequisites:" -ForegroundColor Yellow
+    foreach ($m in $missing) { Write-Host "  - $m" }
+    throw "install the above, then re-run"
+  }
+
   Write-Host "`nbuilding whisper_bench (release — a debug build measures the wrong thing)"
   cargo build --release --features eval --bin whisper_bench --manifest-path src-tauri\Cargo.toml
   if ($LASTEXITCODE -ne 0) { throw "build failed" }

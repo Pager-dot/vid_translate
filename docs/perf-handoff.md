@@ -27,12 +27,12 @@ Lenovo ThinkBook 14s Yoga G2 IAP, dual-booting Fedora 43 (GNOME/Wayland) and Win
 Confirmed against [Notebookcheck](https://www.notebookcheck.net/589628.0.html) and
 [TechPowerUp](https://techpowerup.com/cpu-specs/core-i7-1255u.c2593).
 
-**There may be a second machine.** A Windows desktop at
-`C:\Users\pager_dot\Desktop\vid_translate` was mentioned and it is **not confirmed** to be
-this laptop booted into Windows. If it is a separate desktop PC, none of the analysis here
-transfers — different topology, different bandwidth, likely no 15 W ceiling, possibly a
-discrete GPU, which would change the Vulkan question entirely. **Establish which machine any
-benchmark ran on before comparing numbers.**
+**One machine, two OSes.** The Windows checkout at
+`C:\Users\pager_dot\Desktop\vid_translate` is this same laptop dual-booted, confirmed by
+the owner. So Fedora and Windows runs are directly comparable: identical silicon, identical
+thermals, identical power envelope. A gap between them is an OS, driver or build-toolchain
+difference, not a hardware one — which makes the cross-OS delta a useful signal in its own
+right rather than noise to control for.
 
 ---
 
@@ -198,9 +198,11 @@ badly is not an improvement.
 
 ## Next actions, in order
 
-1. Confirm which machine the Windows path refers to (laptop dual-boot vs separate desktop).
-2. Run the two `--preset quick` passes on Fedora, idle and browser-video. ~5 min each.
-3. Read the thread-count and model-size columns. Items 1 and 2 above are likely settled by
-   that alone.
-4. Check the vendored whisper.cpp version before any Vulkan work (item 5).
+1. Run the two `--preset quick` passes on Fedora, idle and browser-video. ~5 min each.
+2. Read the thread-count and model-size columns. Findings 1 and 2 above are likely settled
+   by that alone.
+3. Repeat on Windows for the same-silicon comparison. Verify the P/E logical-processor
+   numbering in Task Manager first — the `0x00F` / `0xFF0` masks assume P-cores land on
+   CPUs 0-3, which Windows does not guarantee the way Linux publishes it.
+4. Check the vendored whisper.cpp version before any Vulkan work (finding 5).
 5. Only then decide whether a backend change is worth building.
