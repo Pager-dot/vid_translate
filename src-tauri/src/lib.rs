@@ -809,9 +809,14 @@ fn is_japanese_text(text: &str) -> bool {
     })
 }
 
-/// Shared JA/ES pipeline: Vosk recognizes the source language, finalized sentences are
-/// handed off to a worker thread that translates them via Ollama (native Rust HTTP calls,
-/// no subprocess) so the audio thread never blocks on network I/O.
+/// Shared JA/ES pipeline. The recognizer (`backend`) decodes the source language and
+/// finalized sentences are handed off to a worker thread that translates them via Ollama
+/// (native Rust HTTP calls, no subprocess) or the local CTranslate2 model, so the audio
+/// thread never blocks on network I/O.
+///
+/// When `backend.emits_english()` the recognizer already produced English — Whisper's
+/// native translate task, which is the shipped Japanese path — and both the chunker and the
+/// translation stage are short-circuited.
 fn run_translated_pipeline(
     app_handle: tauri::AppHandle,
     stop_flag: Arc<AtomicBool>,
@@ -827,8 +832,9 @@ fn run_translated_pipeline(
     // One unit of work for the translator thread.
     struct TranslateJob {
         text: String,
-        /// True when this is the true tail end of a spoken utterance (a real Vosk `Final`)
-        /// rather than an eagerly-flushed mid-utterance chunk. The frontend needs to tell
+        /// True when this is the true tail end of a spoken utterance
+        /// rather than an eagerly-flushed mid-utterance chunk (a real recognizer `Final`).
+        /// The frontend needs to tell
         /// these apart: a mid-utterance chunk shouldn't reset the live "currently speaking"
         /// caption, only a real utterance end should.
         is_utterance_end: bool,

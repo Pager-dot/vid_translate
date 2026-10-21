@@ -49,46 +49,265 @@ default, and stays out of your way.
 
 ```
 vid_translate/
-├── index.html                    # Single HTML page Tauri loads (mounts #root)
-├── package.json                  # Frontend deps (React 19, Vite 7, lucide-react) & scripts
-├── vite.config.js                # Vite dev-server config for Tauri (port 1420)
-├── README.md                     # This file
-├── THIRD_PARTY_NOTICES.md        # License notices for borrowed code (Mimi, Lucide)
-├── docs/                         # Design notes and measurements
-├── eval/                         # Offline translation-quality harness (BLEU/chrF)
+├── index.html                      # Single HTML page Tauri loads (mounts #root)
+├── package.json                    # Frontend deps (React 19, Vite 7, lucide-react) & scripts
+├── vite.config.js                  # Vite dev-server config for Tauri (port 1420)
+├── README.md                       # This file
+├── THIRD_PARTY_NOTICES.md          # License notices for borrowed code (Mimi, Lucide)
+├── ja-chunking-plan.md             # Historical: the JA chunking plan and why it was wrong
 │
-├── src/                          # ── React frontend ──
-│   ├── main.jsx                  # React entry point
-│   ├── App.jsx                   # All app state, IPC wiring, and the three surfaces
-│   ├── App.css                   # Base layer: tokens, motion, scrollbars
-│   ├── overlay.css               # Caption surfaces: canvas, timeline, setup cards
-│   ├── settings.css              # Settings console: sidebar, cards, rows, controls
-│   └── ui/                       # Shared controls, ported from Mimi (see Credits)
-│       ├── Icon.jsx              # Lucide wrapper, icons at 1em in the current colour
-│       ├── PulseRing.jsx/.css    # The "sound light" session-phase indicator
-│       ├── ControlButton.jsx     # 24px overlay control, icon or short word
-│       ├── DragHandle.jsx        # The always-visible move affordance
-│       ├── Select.jsx/.css       # Portalled picker with full keyboard support
-│       ├── Switch.jsx            # Settings toggle
-│       └── Tooltip.jsx/.css      # Shared label for compact controls
+├── docs/                           # ── Design notes & measurements ──
+│   ├── ja-diagnosis.md             # JA→EN quality teardown; the BLEU numbers come from here
+│   ├── bench-whisper.md            # How to measure what a Whisper pass costs
+│   └── perf-handoff.md             # Why GPU/Vulkan became the default
 │
-└── src-tauri/                    # ── Rust backend ──
-    ├── src/lib.rs                # Commands, pipelines, model downloads, status events
-    ├── src/audio/                # System-audio capture per platform
-    │   ├── linux.rs              # PulseAudio/PipeWire via `parec`
-    │   ├── windows.rs            # WASAPI loopback
-    │   ├── macos.rs, tap.rs      # Core Audio process tap (macOS 14.4+)
-    │   └── mod.rs                # Shared capture API, preflight, mic fallback
-    ├── src/recognizer/           # Speech recognition backends
-    │   ├── vosk.rs               # Streaming CTC (English)
-    │   └── whisper.rs            # whisper.cpp (Japanese, Spanish)
-    ├── src/chunker/              # Clause-boundary detection, so translation starts early
-    │   ├── japanese.rs
-    │   └── spanish.rs
-    ├── src/marian.rs             # Offline translation via CTranslate2 (`ct2rs`)
-    ├── src/debug.rs              # Diagnostic logging
-    └── src/bin/ja_eval.rs        # Offline eval runner (not shipped in the app)
+├── eval/                           # Offline translation-quality harness (BLEU/chrF)
+│   ├── run.sh                      # Builds ja_eval and scores the corpus
+│   └── ja/, es/                    # Clips + hand-written English references
+│
+├── scripts/
+│   ├── tauri.mjs                   # `npm run tauri` — applies the Windows path-length fix
+│   ├── dev-macos.sh                # macOS dev: builds + signs so TCC can grant audio access
+│   ├── fetch-libvosk-macos.sh      # Downloads the universal2 libvosk.dylib
+│   ├── bump-version.mjs            # `npm run version:set` — package.json + Cargo + lockfiles
+│   ├── make-latest-json.mjs        # Assembles the updater manifest (hard-fails if partial)
+│   └── bench-whisper.sh / .ps1     # Drives the whisper_bench matrix
+│
+├── packaging/msix/                 # Microsoft Store packaging (manifest + pack script)
+├── .github/workflows/              # release, publish-release, msstore, msstore-diagnose
+├── assets/, public/                # Logo (SVG)
+│
+├── src/                            # ── React frontend ──
+│   ├── main.jsx                    # React entry point
+│   ├── App.jsx                     # All app state, IPC wiring, and the three surfaces
+│   ├── App.css                     # Base layer: tokens, motion, scrollbars
+│   ├── overlay.css                 # Caption surfaces: canvas, timeline, setup cards
+│   ├── settings.css                # Settings console: sidebar, cards, rows, controls
+│   └── ui/                         # Shared controls, ported from Mimi (see Credits)
+│       ├── Icon.jsx                # Lucide wrapper, icons at 1em in the current colour
+│       ├── PulseRing.jsx/.css      # The "sound light" session-phase indicator
+│       ├── ControlButton.jsx/.css  # 24px overlay control, icon or short word
+│       ├── DragHandle.jsx          # The always-visible move affordance
+│       ├── Select.jsx/.css         # Portalled picker with full keyboard support
+│       ├── Switch.jsx              # Settings toggle
+│       └── Tooltip.jsx/.css        # Shared label for compact controls
+│       └── tooltipPosition.js      # Flip/clamp logic that keeps tooltips on screen
+│
+└── src-tauri/                      # ── Rust backend ──
+    ├── Cargo.toml                  # Deps; `eval` feature gates the two dev binaries
+    ├── build.rs                    # rpaths for libvosk, re-exports VT_CHANNEL
+    ├── tauri.conf.json             # Window config, updater pubkey (+ 3 platform overlays)
+    ├── Info.plist                  # macOS: TCC usage strings + bundle id for the dev binary
+    ├── entitlements.plist          # macOS: for whenever real Developer ID signing happens
+    ├── capabilities/default.json   # Tauri permissions
+    ├── vendor/, *.dll              # Prebuilt libvosk per platform
+    └── src/
+        ├── main.rs                 # Binary entry point; calls lib.rs
+        ├── lib.rs                  # Commands, the three pipelines, downloads, status events
+        ├── audio/                  # System-audio capture per platform
+        │   ├── mod.rs              # Shared capture API, preflight, mic fallback
+        │   ├── linux.rs            # PulseAudio/PipeWire via `parec`
+        │   ├── windows.rs          # WASAPI loopback
+        │   ├── macos.rs            # Core Audio tap drain + downmix/resample to 16k
+        │   └── tap.rs              # The process-tap unsafe layer (macOS 14.4+)
+        ├── recognizer/             # Speech recognition backends behind one enum
+        │   ├── mod.rs              # `Backend` + `run()`; `emits_english()` decides the path
+        │   ├── vosk.rs             # Streaming CTC (English)
+        │   └── whisper.rs          # whisper.cpp (Japanese, Spanish)
+        ├── chunker/                # Clause-boundary detection, so translation starts early
+        │   ├── mod.rs              # `for_language()`; the shared boundary contract
+        │   ├── japanese.rs         # Only used in JA two-stage mode
+        │   └── spanish.rs
+        ├── marian.rs               # Offline translation via CTranslate2 (`ct2rs`)
+        ├── updater.rs              # app_info / check_for_update / install_update
+        ├── debug.rs                # Diagnostic logging (VID_TRANSLATE_DEBUG_ASR)
+        └── bin/                    # Dev-only, behind `--features eval`
+            ├── ja_eval.rs          # Offline eval runner — drives the real pipeline
+            └── whisper_bench.rs    # Measures one Whisper config, prints a CSV row
 ```
+
+---
+
+## 🏗️ System Design
+
+### 1. Runtime: audio → caption
+
+One capture contract feeds three different pipelines. The mode decides the recognizer, and
+the recognizer decides whether a translation stage exists at all.
+
+```mermaid
+flowchart TD
+    subgraph OS["Operating system"]
+        LIN["Linux<br/>parec on the<br/>PulseAudio monitor"]
+        WIN["Windows<br/>WASAPI loopback on<br/>the render device"]
+        MAC["macOS 14.4+<br/>Core Audio process tap<br/>in a private aggregate"]
+        MIC["Microphone fallback<br/>(cpal)"]
+    end
+
+    LIN --> CAP
+    WIN --> CAP
+    MAC --> CAP
+    MIC --> CAP
+
+    CAP{{"audio::start_capture()<br/><b>16 kHz mono i16, 250 ms chunks</b><br/>mpsc::Receiver&lt;Vec&lt;i16&gt;&gt;"}}
+
+    CAP --> MODE{"mode"}
+
+    MODE -->|"en"| VOSK["recognizer::vosk<br/>streaming CTC<br/>&lt;10 ms per chunk"]
+    MODE -->|"ja"| WJA["recognizer::whisper<br/>lang=ja, <b>translate=true</b>"]
+    MODE -->|"es"| WES["recognizer::whisper<br/>lang=es, translate=false"]
+
+    VOSK -->|"partial / final"| EV
+    WJA -->|"already English —<br/>emits_english() == true,<br/>chunker and MT bypassed"| EV
+
+    WES -->|"Spanish text"| CHUNK["chunker::spanish<br/>cuts at clause boundaries<br/>so MT can start early"]
+    CHUNK --> XL{"use_local?"}
+    XL -->|"yes"| MAR["marian.rs<br/>CTranslate2 es→en<br/>offline, no network"]
+    XL -->|"no"| OLL["Ollama<br/>localhost:11434<br/>or ollama.com"]
+    MAR --> EV
+    OLL --> EV
+
+    EV["emit(&quot;transcription&quot;)<br/>partial · final<br/>partial-chunk · final-chunk<br/>streaming-en"]
+
+    EV --> UI["src/App.jsx<br/>listen() → caption surfaces"]
+
+    WD["spawn_capture_watchdog<br/>all-zero samples for 6 s → permission denied<br/>no buffers for 3 s → no audio frames"]
+    CAP -.->|"observes"| WD
+    WD -.->|"emit(&quot;status&quot;)"| UI
+```
+
+> **Why JA skips the chunker.** Whisper's translate task returns English, so there is nothing
+> left to chunk and nothing left to translate — `native_en` short-circuits both stages and the
+> text goes straight to the screen. `VID_TRANSLATE_JA_TWO_STAGE=1` restores the chunker and MT
+> path for hand comparison. See [Why this split](#-why-this-split).
+
+### 2. Module map
+
+Who owns what, and who calls whom.
+
+```mermaid
+flowchart LR
+    subgraph FE["Frontend — src/"]
+        APP["App.jsx<br/><i>all state, all IPC</i>"]
+        UIK["ui/<br/>Select · Switch · Tooltip<br/>ControlButton · DragHandle · PulseRing"]
+        APP --> UIK
+    end
+
+    subgraph BE["Backend — src-tauri/src/"]
+        LIB["lib.rs<br/><i>commands · pipelines · downloads</i>"]
+        AUD["audio/<br/>mod · linux · windows · macos · tap"]
+        REC["recognizer/<br/>mod · vosk · whisper"]
+        CHK["chunker/<br/>mod · japanese · spanish"]
+        MAR2["marian.rs<br/>CTranslate2"]
+        UPD["updater.rs"]
+        DBG["debug.rs"]
+
+        LIB --> AUD
+        LIB --> REC
+        LIB --> CHK
+        LIB --> MAR2
+        LIB --> UPD
+        REC -.-> DBG
+    end
+
+    subgraph DEV["Dev-only — --features eval"]
+        JE["bin/ja_eval.rs"]
+        WB["bin/whisper_bench.rs"]
+    end
+
+    APP <-->|"Tauri IPC<br/>invoke ⇄ emit"| LIB
+    JE -->|"drives the real<br/>components, not copies"| REC
+    JE --> CHK
+    JE --> MAR2
+    WB --> REC
+```
+
+`lib.rs` is the only module that knows which mode is running. `audio/` does not know what
+recognizes its chunks; `recognizer/` does not know what happens to its text. That is what let
+Japanese move from Vosk to Whisper without touching the pipeline, and what the eval binaries
+exploit to measure the shipped code rather than a reimplementation of it.
+
+### 3. Model acquisition & setup state
+
+No model ships inside the app. Every pipeline checks its model on start and emits a status
+the frontend turns into a one-click download card.
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle
+    idle --> preflight: start_listening(mode)
+
+    preflight --> audio_tap_unavailable: macOS &lt; 14.4
+    preflight --> checking: OS supported
+
+    checking --> model_missing: en, no Vosk model
+    checking --> whisper_ja_model_missing: ja, no ggml file
+    checking --> whisper_es_model_missing: es, no ggml file
+    checking --> ct2_es_model_missing: es + local, no CT2 model
+    checking --> loading: model present
+
+    model_missing --> downloading: download_vosk_model
+    whisper_ja_model_missing --> downloading: download_whisper_model
+    whisper_es_model_missing --> downloading: download_whisper_model
+    ct2_es_model_missing --> downloading: download_ct2_model
+
+    downloading --> checking: *_download_progress<br/>status = done
+
+    loading --> listening: model loaded,<br/>on_ready fires
+    listening --> audio_permission_denied: watchdog — 6 s of<br/>bit-exact zero samples
+    listening --> idle: stop_listening
+    audio_permission_denied --> idle: open_audio_privacy_settings
+    audio_tap_unavailable --> idle: use microphone
+```
+
+Everything lands under one directory:
+
+```
+~/.local/share/vid_translate/                   (Linux)
+%LOCALAPPDATA%\vid_translate\                   (Windows)
+~/Library/Application Support/vid_translate/    (macOS)
+    ├── vosk-model              # English recognition (Vosk is English-only)
+    ├── ggml-small.bin          # Whisper, for JA and ES — size is your choice
+    ├── ct2-model-ja            # Offline ja→en (only for two-stage mode)
+    └── ct2-model-es            # Offline es→en
+```
+
+### 4. Build & release
+
+A tag is the build trigger; publishing the draft is the rollout switch.
+
+```mermaid
+flowchart TD
+    V["npm run version:set -- X.Y.Z<br/>package.json + Cargo.toml + lockfiles"] --> TAG["git tag vX.Y.Z && push"]
+
+    TAG --> RL["release.yml"]
+
+    RL --> L["Linux<br/>AppImage + .deb"]
+    RL --> W["Windows<br/>.msi + NSIS -setup.exe"]
+    RL --> M["macOS 14 arm64<br/>.app → .dmg"]
+
+    L -->|"re-sign AFTER<br/>wayland un-bundling"| SIG
+    W --> SIG
+    M -->|"ad-hoc codesign,<br/>re-tar the SIGNED app"| SIG
+
+    SIG["tauri signer sign<br/><i>minisign, TAURI_SIGNING_PRIVATE_KEY</i>"]
+    SIG --> LJ["make-latest-json.mjs<br/><i>hard-fails rather than emit<br/>a partial manifest</i>"]
+    LJ --> DRAFT["Draft GitHub release"]
+
+    DRAFT --> PUB["publish-release.yml<br/><i>un-drafts, then verifies the<br/>endpoint serves this version</i>"]
+    PUB --> LIVE[["releases/latest/download/latest.json<br/><b>users now see the update</b>"]]
+
+    TAG -.->|"separate, manual"| MS["msstore.yml<br/>MSIX, VT_CHANNEL=msstore<br/><i>updater compiled off</i>"]
+    MS --> STORE[["Microsoft Store"]]
+
+    LIVE --> CH{"updater::channel()<br/>at runtime"}
+    CH -->|"$APPIMAGE set,<br/>.dmg, -setup.exe"| SELF["App updates itself"]
+    CH -->|"MSIX / Flatpak / .deb"| EXT["Updater disabled —<br/>the platform updates it"]
+```
+
+> `latest.json` is all-or-nothing: Tauri validates the whole manifest before comparing
+> versions, so one missing signature breaks updates on *every* platform, not just the one.
+> That is why the generator fails the build instead of degrading.
 
 ---
 
