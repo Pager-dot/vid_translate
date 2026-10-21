@@ -26,9 +26,15 @@ const SETTINGS_W = 920;
 // showing — tall mode windows would otherwise leave a large invisible click-blocking
 // strip around the small centered card.
 const SETUP_SCREEN_H = 190;
+// Every mode is a source language. Modes in TRANSLATE_MODES recognize that language and
+// emit English plus a source-language line; "en" captions English directly. Adding a
+// language means adding it to MODES (below) and here — nothing else branches on the mode.
+const MODES = ["en", "ja", "es"];          // the mode button cycles these in order
+const TRANSLATE_MODES = new Set(["ja", "es"]);
+const isTranslateMode = (m) => TRANSLATE_MODES.has(m);
+
 const SETUP_STATUSES = [
   "model_missing",
-  "vosk_ja_model_missing",
   "whisper_ja_model_missing",
   "whisper_es_model_missing",
   "ct2_ja_model_missing",
@@ -718,12 +724,12 @@ export default function App() {
   // "partial-chunk", or a chunk the backend cut on a length/time guard rather than a real
   // clause boundary). Rendered dimmed, because it will be replaced as the speaker finishes.
   const [pendingProvisional, setPendingProvisional] = useState(false);
-  const [japaneseStream, setJapaneseStream]         = useState("");
+  const [sourceStream, setSourceStream]         = useState("");
   const historyEndRef = useRef(null);
 
   const [status, setStatus]               = useState("idle");
   const [running, setRunning]             = useState(false);
-  const [mode, setMode]                   = useState("vosk");
+  const [mode, setMode]                   = useState("en");
   const [liveOnly, setLiveOnly]           = useState(false);
   const [settingsOpen, setSettingsOpen]   = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(null); // { kind, status, downloaded, total, error }
@@ -798,7 +804,7 @@ export default function App() {
   // Load the Whisper model while the user is still looking at the window, rather than
   // after they press Start. Fire-and-forget and idempotent on the Rust side.
   useEffect(() => {
-    if (mode !== "vosk-ja" && mode !== "vosk-es") return;
+    if (!isTranslateMode(mode)) return;
     invoke("warm_whisper_model", { model: settings.whisperModel }).catch(() => {});
   }, [mode, settings.whisperModel]);
 
@@ -858,10 +864,10 @@ export default function App() {
           }
         } catch { /* ignore corrupt saved position */ }
       }
-      const isJa = mode === "vosk-ja" || mode === "vosk-es";
+      const isTranslate = isTranslateMode(mode);
       const h = SETUP_STATUSES.includes(status)
         ? SETUP_SCREEN_H
-        : isJa && !liveOnly ? settings.jaHeight : settings.enHeight;
+        : isTranslate && !liveOnly ? settings.jaHeight : settings.enHeight;
       await doResize(settings.width ?? screenWidth(), h);
     })();
   }, [mode, liveOnly, status, settings.width, settings.enHeight, settings.jaHeight]);
@@ -901,8 +907,8 @@ export default function App() {
         const exp = expectedSizeRef.current;
         if (exp && Math.abs(size.width - exp.width) < 2 && Math.abs(size.height - exp.height) < 2) return;
         expectedSizeRef.current = { width: size.width, height: size.height };
-        const isJa = modeRef.current === "vosk-ja" || modeRef.current === "vosk-es";
-        const heightKey = isJa && !liveOnlyRef.current ? "jaHeight" : "enHeight";
+        const isTranslate = isTranslateMode(modeRef.current);
+        const heightKey = isTranslate && !liveOnlyRef.current ? "jaHeight" : "enHeight";
         setSettings((s) => {
           const next = { ...s, width: Math.round(size.width), [heightKey]: Math.round(size.height) };
           localStorage.setItem("vt_settings", JSON.stringify(next));
@@ -918,9 +924,9 @@ export default function App() {
       const unlistenTx = await listen("transcription", (event) => {
         const { text, current, type: kind, id, provisional } = event.payload;
 
-        if (modeRef.current === "vosk-ja" || modeRef.current === "vosk-es") {
+        if (isTranslateMode(modeRef.current)) {
           if (kind === "partial") {
-            setJapaneseStream(text);
+            setSourceStream(text);
           } else if (kind === "partial-chunk") {
             // The in-progress clause, re-translated from its start on every update. This
             // replaces the live line in place and deliberately does NOT go through the
@@ -930,7 +936,7 @@ export default function App() {
             setPendingEnglish(text);
             setPendingProvisional(true);
           } else if (kind === "streaming-en") {
-            if (modeRef.current === "vosk-ja" && !useLocalRef.current) {
+            if (modeRef.current === "ja" && !useLocalRef.current) {
               // Ollama streams the accumulated translation token-by-token — already a
               // natural live ticker. Pacing those dozens of updates at 500ms each would
               // back the queue up by half a minute, so show them directly.
@@ -955,8 +961,8 @@ export default function App() {
             clearPendingQueue();
             setPendingEnglish("");
             setPendingProvisional(false);
-            setJapaneseStream("");
-          } else if (modeRef.current === "vosk-ja" && useLocalRef.current) {
+            setSourceStream("");
+          } else if (modeRef.current === "ja" && useLocalRef.current) {
             // Local JA: the live line is the re-translated tail (above), not a paced
             // word-by-word reveal, so a finalized line commits straight to history.
             clearPendingQueue();
@@ -966,7 +972,7 @@ export default function App() {
             });
             setPendingEnglish("");
             setPendingProvisional(false);
-            setJapaneseStream("");
+            setSourceStream("");
           } else {
             clearPendingQueue();
             setTranslationHistory((h) => {
@@ -975,7 +981,7 @@ export default function App() {
             });
             setPendingEnglish("");
             setPendingProvisional(false);
-            setJapaneseStream("");
+            setSourceStream("");
           }
         } else {
           clearTimeout(clearTimer.current);
@@ -1061,14 +1067,14 @@ export default function App() {
       setTranslationHistory([]);
       clearPendingQueue();
       setPendingEnglish("");
-      setJapaneseStream("");
+      setSourceStream("");
     } else {
       setWords([]);
       setCurrentJa("");
       setTranslationHistory([]);
       clearPendingQueue();
       setPendingEnglish("");
-      setJapaneseStream("");
+      setSourceStream("");
       setRunning(true);
       await invoke("start_listening", {
         mode,
@@ -1089,12 +1095,11 @@ export default function App() {
     clearPendingQueue();
     setPendingEnglish("");
     setPendingProvisional(false);
-    setJapaneseStream("");
+    setSourceStream("");
     setWords([]);
     setCurrentJa("");
   };
 
-  const MODES = ["vosk", "vosk-ja", "vosk-es"];
   const toggleMode = () => {
     if (!running) {
       setMode((m) => MODES[(MODES.indexOf(m) + 1) % MODES.length]);
@@ -1124,7 +1129,7 @@ export default function App() {
   };
 
   const overlayHeight = (s) =>
-    (mode === "vosk-ja" || mode === "vosk-es") && !liveOnly ? s.jaHeight : s.enHeight;
+    isTranslateMode(mode) && !liveOnly ? s.jaHeight : s.enHeight;
 
   const closeSettings = async () => {
     setSettingsOpen(false);
@@ -1253,7 +1258,6 @@ export default function App() {
   // ── Setup screens: model missing → one-click auto-download, no manual steps ──
   const MISSING_MODEL_KIND = {
     model_missing: { kind: "en", label: "English speech", type: "vosk" },
-    vosk_ja_model_missing: { kind: "ja", label: "Japanese speech", type: "vosk" },
     // Japanese recognises with Whisper now. One ggml file whose size is the user's choice
     // (31MB to 1.4GB — see WHISPER_MODELS), so the progress bar earns its keep.
     whisper_ja_model_missing: { kind: "whisper", label: "Japanese speech", type: "whisper" },
@@ -1345,8 +1349,8 @@ export default function App() {
   }
 
   // ── JA / ES translation mode ────────────────────────────────────────────────
-  if (mode === "vosk-ja" || mode === "vosk-es") {
-    const isEs = mode === "vosk-es";
+  if (isTranslateMode(mode)) {
+    const isEs = mode === "es";
     // A "final-chunk" pushes its text into history but deliberately leaves the pending
     // queue/display running (the utterance isn't over yet). If that chunk was the one
     // currently on screen, it now reads as both the bold "latest" history line and the
@@ -1355,7 +1359,7 @@ export default function App() {
       ? capPendingWords(translationHistory[translationHistory.length - 1])
       : "";
     const showPending = pendingEnglish && pendingEnglish !== latestHistoryLine;
-    const showSource = !liveOnly && japaneseStream;
+    const showSource = !liveOnly && sourceStream;
     const hasContent = translationHistory.length > 0 || showPending || showSource;
     const phase = activityPhase(status, running);
 
@@ -1449,7 +1453,7 @@ export default function App() {
               )}
               {showSource && (
                 <div className="subtitle-block subtitle-block--source" data-tauri-drag-region>
-                  {japaneseStream}
+                  {sourceStream}
                 </div>
               )}
               <div ref={historyEndRef} />

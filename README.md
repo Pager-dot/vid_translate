@@ -53,7 +53,6 @@ vid_translate/
 ├── package.json                  # Frontend deps (React 19, Vite 7, lucide-react) & scripts
 ├── vite.config.js                # Vite dev-server config for Tauri (port 1420)
 ├── README.md                     # This file
-├── HANDOFF.md                    # Developer handoff notes / design rationale
 ├── THIRD_PARTY_NOTICES.md        # License notices for borrowed code (Mimi, Lucide)
 ├── docs/                         # Design notes and measurements
 ├── eval/                         # Offline translation-quality harness (BLEU/chrF)

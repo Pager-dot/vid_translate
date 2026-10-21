@@ -27,7 +27,7 @@ if [ ${#clips[@]} -eq 0 ]; then
 fi
 
 echo "==> building ja_eval"
-cargo build --release --manifest-path "$repo_root/src-tauri/Cargo.toml" --bin ja_eval
+cargo build --release --manifest-path "$repo_root/src-tauri/Cargo.toml" --features eval --bin ja_eval
 
 echo "==> running ${#clips[@]} clip(s)"
 "$repo_root/src-tauri/target/release/ja_eval" "${clips[@]}" \

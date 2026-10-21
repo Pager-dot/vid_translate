@@ -1,6 +1,6 @@
 # Performance investigation — handoff
 
-Companion to `HANDOFF.md`, scoped to one question: **why the app keeps up on an M3 Mac and
+Scoped to one question: **why the app keeps up on an M3 Mac and
 drops audio on Windows/Linux, and what to do about it.**
 
 Written to be self-contained. A session that reads this and `docs/bench-whisper.md` has the

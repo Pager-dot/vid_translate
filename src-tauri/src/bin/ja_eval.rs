@@ -121,7 +121,7 @@ fn pick_backend(lang: &'static str) -> (Backend, std::path::PathBuf) {
         });
     // Matches the app, which differs by language: Japanese uses Whisper's own translate
     // task, Spanish transcribes and hands the text to the es->en Marian model (+6.04 BLEU
-    // over native translate there — see `run_vosk_es_pipeline`).
+    // over native translate there — see `run_es_pipeline`).
     // VID_TRANSLATE_JA_TWO_STAGE=1 forces the two-stage path for Japanese too.
     let two_stage = std::env::var("VID_TRANSLATE_JA_TWO_STAGE").is_ok_and(|v| v == "1");
     let translate = lang == "ja" && !two_stage;

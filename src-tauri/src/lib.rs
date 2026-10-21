@@ -57,18 +57,11 @@ impl Default for PipelineState {
     }
 }
 
-fn vosk_model_path() -> std::path::PathBuf {
+fn vosk_en_model_path() -> std::path::PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("vid_translate")
         .join("vosk-model")
-}
-
-fn vosk_ja_model_path() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("vid_translate")
-        .join("vosk-model-ja")
 }
 
 /// Whisper replaced Vosk for Japanese: on multi-speaker audio Vosk lost about a third of
@@ -139,29 +132,11 @@ fn whisper_model_path(id: &str) -> std::path::PathBuf {
     whisper_dir().join(whisper_model_file(id))
 }
 
-fn vosk_es_model_path() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("vid_translate")
-        .join("vosk-model-es")
-}
-
 fn vosk_model_url_and_path(kind: &str) -> Result<(&'static str, std::path::PathBuf), String> {
     match kind {
         "en" => Ok((
             "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
-            vosk_model_path(),
-        )),
-        "ja" => Ok((
-            // The small model (48MB) has a high enough word-error-rate on real speech
-            // (numbers, casual/fast talking) that it invents entirely different sentences —
-            // no amount of chunking/translation-side tuning can recover meaning lost here.
-            "https://alphacephei.com/vosk/models/vosk-model-ja-0.22.zip",
-            vosk_ja_model_path(),
-        )),
-        "es" => Ok((
-            "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip",
-            vosk_es_model_path(),
+            vosk_en_model_path(),
         )),
         other => Err(format!("unknown model kind: {other}")),
     }
@@ -194,7 +169,7 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(())
 }
 
-/// Downloads and extracts a Vosk model zip directly — no external tools (curl, PowerShell,
+/// Downloads and extracts the English Vosk model zip directly — no external tools (curl, PowerShell,
 /// Python) required. Emits "vosk_download_progress" events for the settings/setup UI.
 #[tauri::command]
 fn download_vosk_model(app: tauri::AppHandle, kind: String) {
@@ -734,7 +709,7 @@ fn start_listening(
     pipeline.stop_flag = stop_flag.clone();
 
     let app_handle = app.clone();
-    let mode = mode.unwrap_or_else(|| "vosk".into());
+    let mode = mode.unwrap_or_else(|| "en".into());
     let use_local = use_local_translation.unwrap_or(false);
     let whisper_model = whisper_model_id(whisper_model);
 
@@ -749,7 +724,7 @@ fn start_listening(
             return;
         }
         match mode.as_str() {
-            "vosk-ja" => run_vosk_ja_pipeline(
+            "ja" => run_ja_pipeline(
                 app_handle,
                 stop_flag,
                 ollama_key,
@@ -757,7 +732,7 @@ fn start_listening(
                 use_local,
                 whisper_model,
             ),
-            "vosk-es" => run_vosk_es_pipeline(
+            "es" => run_es_pipeline(
                 app_handle,
                 stop_flag,
                 ollama_key,
@@ -765,15 +740,15 @@ fn start_listening(
                 use_local,
                 whisper_model,
             ),
-            _ => run_vosk_pipeline(app_handle, stop_flag),
+            _ => run_en_pipeline(app_handle, stop_flag),
         }
     });
 
     pipeline.thread = Some(handle);
 }
 
-fn run_vosk_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
-    let vosk_path = vosk_model_path();
+fn run_en_pipeline(app_handle: tauri::AppHandle, stop_flag: Arc<AtomicBool>) {
+    let vosk_path = vosk_en_model_path();
     if !vosk_path.exists() {
         let _ = app_handle.emit("status", StatusEvent { state: "model_missing".into() });
         return;
@@ -1184,7 +1159,7 @@ fn run_translated_pipeline(
     }
 }
 
-fn run_vosk_es_pipeline(
+fn run_es_pipeline(
     app_handle: tauri::AppHandle,
     stop_flag: Arc<AtomicBool>,
     ollama_key: Option<String>,
@@ -1235,7 +1210,7 @@ fn run_vosk_es_pipeline(
     );
 }
 
-fn run_vosk_ja_pipeline(
+fn run_ja_pipeline(
     app_handle: tauri::AppHandle,
     stop_flag: Arc<AtomicBool>,
     ollama_key: Option<String>,
@@ -1243,9 +1218,9 @@ fn run_vosk_ja_pipeline(
     use_local: bool,
     whisper_model: String,
 ) {
-    // Japanese recognises with Whisper, not Vosk. Vosk remains the recognizer for Spanish
-    // and English, where it performs acceptably and its sub-second streaming is worth more
-    // than the accuracy difference.
+    // Japanese recognises with Whisper, not Vosk. Vosk is now the English recognizer only:
+    // its sub-second streaming is what the live English ticker is for, and accuracy is what
+    // the translated modes need instead.
     let ja_path = whisper_model_path(&whisper_model);
     if !ja_path.exists() {
         let _ = app_handle.emit("status", StatusEvent { state: "whisper_ja_model_missing".into() });
