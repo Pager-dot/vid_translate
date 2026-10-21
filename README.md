@@ -149,11 +149,11 @@ flowchart TD
     MAC --> CAP
     MIC --> CAP
 
-    CAP{{"audio::start_capture()<br/><b>16 kHz mono i16, 250 ms chunks</b><br/>mpsc::Receiver&lt;Vec&lt;i16&gt;&gt;"}}
+    CAP{{"audio::start_capture()<br/><b>16 kHz mono i16, 250 ms chunks</b><br/>one mpsc channel of i16 buffers"}}
 
     CAP --> MODE{"mode"}
 
-    MODE -->|"en"| VOSK["recognizer::vosk<br/>streaming CTC<br/>&lt;10 ms per chunk"]
+    MODE -->|"en"| VOSK["recognizer::vosk<br/>streaming CTC<br/>under 10 ms per chunk"]
     MODE -->|"ja"| WJA["recognizer::whisper<br/>lang=ja, <b>translate=true</b>"]
     MODE -->|"es"| WES["recognizer::whisper<br/>lang=es, translate=false"]
 
@@ -167,13 +167,13 @@ flowchart TD
     MAR --> EV
     OLL --> EV
 
-    EV["emit(&quot;transcription&quot;)<br/>partial · final<br/>partial-chunk · final-chunk<br/>streaming-en"]
+    EV["emit → transcription<br/>partial · final<br/>partial-chunk · final-chunk<br/>streaming-en"]
 
     EV --> UI["src/App.jsx<br/>listen() → caption surfaces"]
 
     WD["spawn_capture_watchdog<br/>all-zero samples for 6 s → permission denied<br/>no buffers for 3 s → no audio frames"]
     CAP -.->|"observes"| WD
-    WD -.->|"emit(&quot;status&quot;)"| UI
+    WD -.->|"emit → status"| UI
 ```
 
 > **Why JA skips the chunker.** Whisper's translate task returns English, so there is nothing
@@ -237,7 +237,7 @@ stateDiagram-v2
     [*] --> idle
     idle --> preflight: start_listening(mode)
 
-    preflight --> audio_tap_unavailable: macOS &lt; 14.4
+    preflight --> audio_tap_unavailable: macOS below 14.4
     preflight --> checking: OS supported
 
     checking --> model_missing: en, no Vosk model
