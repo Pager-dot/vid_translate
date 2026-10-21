@@ -10,7 +10,7 @@ mod windows;
 mod linux;
 
 #[cfg(target_os = "macos")]
-pub use macos::{capture_fault, preflight, set_prefer_microphone, start_capture};
+pub use macos::{capture_fault, preflight, start_capture};
 #[cfg(target_os = "windows")]
 pub use windows::start_capture;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -73,6 +73,3 @@ pub fn preflight() -> Result<(), CaptureFault> {
 pub fn capture_fault() -> Option<CaptureFault> {
     None
 }
-
-#[cfg(not(target_os = "macos"))]
-pub fn set_prefer_microphone(_prefer: bool) {}

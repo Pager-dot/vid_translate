@@ -77,13 +77,9 @@ wasapi = "0.23"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16.0", features = ["metal"] }
-# Microphone capture only. System audio goes through a Core Audio process tap instead (see
-# src/audio/tap.rs), which cpal cannot reach: the tap's aggregate device is private, and
-# cpal's API starts from device enumeration.
-cpal = "0.15"
-# Core Audio process taps: system-audio capture with no driver. coreaudio-sys is already in
-# the tree via cpal, but naming it pins the binding contract this code depends on rather
-# than inheriting whatever cpal happens to resolve.
+# Core Audio process taps: system-audio capture with no driver. Named explicitly to pin the
+# binding contract this code depends on. (cpal was here for the microphone fallback, which
+# was removed: every supported Mac is Apple Silicon on 14.4+, where the tap always works.)
 coreaudio-sys = "0.2"
 core-foundation = "0.10"
 # CATapDescription is an Objective-C class, and the window's collection behavior is one

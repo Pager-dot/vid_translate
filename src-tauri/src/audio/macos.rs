@@ -12,8 +12,8 @@
 //!
 //! The tap reports its own native rate/format (48 kHz stereo f32 on built-in output,
 //! 44.1 kHz over Bluetooth), so this backend still downmixes to mono and resamples to
-//! 16 kHz i16 before emitting the same 250ms chunks the Linux/Windows backends do — Vosk
-//! only accepts that exact shape. `Resampler` is shared by the tap and microphone paths.
+//! 16 kHz i16 before emitting the same 250ms chunks the Linux/Windows backends do — the
+//! recognizers only accept that exact shape.
 
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
@@ -23,28 +23,12 @@ use std::time::{Duration, Instant};
 
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoopRunInMode};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-// `Sample` carries the `from_sample` conversion method, `FromSample` is the bound it needs,
-// and `SizedSample` is what `build_input_stream` is generic over.
-use cpal::{FromSample, Sample, SizedSample};
-
 use super::{CaptureFault, SAMPLE_RATE};
 use super::tap::{Ring, SystemTap, TapError};
 
 // 250ms chunks — matches the Linux/Windows backends' contract so recognizer.rs doesn't
 // need to care which platform captured the audio.
 const CHUNK_SAMPLES: usize = (SAMPLE_RATE / 4) as usize;
-
-/// Set from the frontend (via the `prefer_microphone` argument to `start_listening`) when the
-/// user chose to caption their microphone instead of system audio — either from a setup
-/// screen after a capture fault, or because that is the mode they want. Process-global rather
-/// than threaded through every pipeline signature because it is a single macOS-only user
-/// preference, not per-session state.
-static PREFER_MICROPHONE: AtomicBool = AtomicBool::new(false);
-
-pub fn set_prefer_microphone(prefer: bool) {
-    PREFER_MICROPHONE.store(prefer, Ordering::Relaxed);
-}
 
 /// Last capture fault, as a `CaptureFault` discriminant (`0` = none). Polled by the
 /// watchdog in `lib.rs` rather than pushed, because the capture thread has no `AppHandle`
@@ -64,7 +48,7 @@ pub fn capture_fault() -> Option<CaptureFault> {
 /// cheaply — permission state is not, because the tap API reports success either way.
 pub fn preflight() -> Result<(), CaptureFault> {
     CAPTURE_FAULT.store(0, Ordering::Relaxed);
-    if PREFER_MICROPHONE.load(Ordering::Relaxed) || super::tap::tap_supported() {
+    if super::tap::tap_supported() {
         Ok(())
     } else {
         Err(CaptureFault::TapUnavailable)
@@ -132,51 +116,13 @@ impl Resampler {
     }
 }
 
-fn build_stream<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    mut resampler: Resampler,
-    tx: mpsc::Sender<Vec<i16>>,
-    stop: Arc<AtomicBool>,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
-where
-    T: SizedSample,
-    f32: FromSample<T>,
-{
-    let mut scratch: Vec<f32> = Vec::new();
-    device.build_input_stream(
-        config,
-        move |data: &[T], _: &cpal::InputCallbackInfo| {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            scratch.clear();
-            scratch.extend(data.iter().map(|&s| f32::from_sample(s)));
-            resampler.push(&scratch, |chunk| {
-                // A closed receiver means the pipeline is shutting down; the capture thread
-                // notices the stop flag on its next tick and drops the stream.
-                let _ = tx.send(chunk);
-            });
-        },
-        |err| eprintln!("[audio] CoreAudio stream error: {err}"),
-        None,
-    )
-}
-
-/// Start capturing system audio (or, if the user opted in, the microphone).
-/// Returns a Receiver yielding 250ms 16kHz mono i16 chunks — same contract as the other
-/// platform backends.
+/// Start capturing system audio. Returns a Receiver yielding 250ms 16kHz mono i16 chunks —
+/// same contract as the other platform backends.
 pub fn start_capture(stop: Arc<AtomicBool>) -> mpsc::Receiver<Vec<i16>> {
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
-        let prefer_mic = PREFER_MICROPHONE.load(Ordering::Relaxed);
-        let result = if prefer_mic {
-            mic_capture_loop(tx, stop)
-        } else {
-            tap_capture_loop(tx, stop)
-        };
-        if let Err(e) = result {
+        if let Err(e) = tap_capture_loop(tx, stop) {
             eprintln!("[audio] CoreAudio capture error: {e}");
         }
     });
@@ -338,50 +284,6 @@ fn silence_verdict(
 /// A new output device only forces a new `Resampler` if it changed the stream's shape.
 fn resampler_needs_rebuild(old: (u32, u16), new: (u32, u16)) -> bool {
     old != new
-}
-
-/// The microphone fallback: still cpal, because enumeration is exactly what is wanted for a
-/// real input device, and it is the escape hatch when the tap path is unavailable.
-fn mic_capture_loop(
-    tx: mpsc::Sender<Vec<i16>>,
-    stop: Arc<AtomicBool>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let device = cpal::default_host()
-        .default_input_device()
-        .ok_or("no input device available")?;
-    let name = device.name().unwrap_or_else(|_| "default input".into());
-
-    let supported = device.default_input_config()?;
-    let sample_format = supported.sample_format();
-    let config: cpal::StreamConfig = supported.into();
-    eprintln!(
-        "[audio] Recording from: {name} ({} Hz, {} ch, {sample_format:?}) [microphone]",
-        config.sample_rate.0, config.channels,
-    );
-
-    let resampler = Resampler::new(config.sample_rate.0, config.channels);
-    // CoreAudio only ever hands back these formats in practice; the rest of cpal's sample
-    // types are listed by the enum but unreachable here.
-    let stream = match sample_format {
-        cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config, resampler, tx, stop.clone()),
-        cpal::SampleFormat::F64 => build_stream::<f64>(&device, &config, resampler, tx, stop.clone()),
-        cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config, resampler, tx, stop.clone()),
-        cpal::SampleFormat::I32 => build_stream::<i32>(&device, &config, resampler, tx, stop.clone()),
-        cpal::SampleFormat::I8 => build_stream::<i8>(&device, &config, resampler, tx, stop.clone()),
-        cpal::SampleFormat::U8 => build_stream::<u8>(&device, &config, resampler, tx, stop.clone()),
-        other => return Err(format!("unsupported sample format: {other:?}").into()),
-    }?;
-
-    stream.play()?;
-
-    // `cpal::Stream` is `!Send` on CoreAudio, so it has to be built, parked and dropped on
-    // this one thread — the audio itself is delivered on CoreAudio's own realtime thread.
-    while !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    drop(stream);
-    Ok(())
 }
 
 #[cfg(test)]

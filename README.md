@@ -141,13 +141,11 @@ flowchart TD
         LIN["Linux<br/>parec on the<br/>PulseAudio monitor"]
         WIN["Windows<br/>WASAPI loopback on<br/>the render device"]
         MAC["macOS 14.4+<br/>Core Audio process tap<br/>in a private aggregate"]
-        MIC["Microphone fallback<br/>(cpal)"]
     end
 
     LIN --> CAP
     WIN --> CAP
     MAC --> CAP
-    MIC --> CAP
 
     CAP{{"audio::start_capture()<br/><b>16 kHz mono i16, 250 ms chunks</b><br/>one mpsc channel of i16 buffers"}}
 
@@ -257,7 +255,7 @@ stateDiagram-v2
     listening --> audio_permission_denied: watchdog — 6 s of<br/>bit-exact zero samples
     listening --> idle: stop_listening
     audio_permission_denied --> idle: open_audio_privacy_settings
-    audio_tap_unavailable --> idle: use microphone
+    audio_tap_unavailable --> idle: unsupported OS
 ```
 
 Everything lands under one directory:
@@ -633,9 +631,6 @@ may have to grant permission again, and macOS will confusingly still list the ol
 enabled. If captions stop working right after an update, that is why — toggle the switch off
 and on, or use the in-app button to reach the pane.
 
-Prefer to caption a live conversation instead? Any of these screens has a **Use microphone**
-button, which captures the default input device instead of system audio.
-
 ## ⚙️ Settings
 
 Open the console with the **⚙** control. Everything persists in `localStorage` and applies
@@ -655,7 +650,6 @@ when you press **Save**.
 | Setting | Default | Notes |
 |---|---|---|
 | Whisper model size | `small` | Tiny → Medium, quantized variants included |
-| Capture the microphone | off | macOS — caption the mic instead of system audio |
 
 **Appearance**
 

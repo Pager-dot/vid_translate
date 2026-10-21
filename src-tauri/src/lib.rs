@@ -691,12 +691,10 @@ fn start_listening(
     ollama_key: Option<String>,
     ollama_model: Option<String>,
     use_local_translation: Option<bool>,
-    prefer_microphone: Option<bool>,
     whisper_model: Option<String>,
 ) {
     // macOS only (a no-op elsewhere): set before the preflight below, since opting into
     // microphone capture is precisely what makes an unavailable system-audio tap acceptable.
-    audio::set_prefer_microphone(prefer_microphone.unwrap_or(false));
 
     let mut pipeline = state.lock().unwrap();
 

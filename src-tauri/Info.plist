@@ -3,13 +3,12 @@
 <!--
   Merged into the generated Contents/Info.plist by tauri-bundler on macOS builds.
 
-  Two separate TCC categories, both required:
+  NSAudioCaptureUsageDescription gates the Core Audio process tap that captures system
+  audio (src-tauri/src/audio/tap.rs). Without it macOS denies the tap *silently* — the
+  create call still reports success and then delivers nothing but zeros forever.
 
-  * NSAudioCaptureUsageDescription gates the Core Audio process tap that captures system
-    audio (src-tauri/src/audio/tap.rs). Without it macOS denies the tap *silently* — the
-    create call still reports success and then delivers nothing but zeros forever.
-  * NSMicrophoneUsageDescription gates the microphone fallback. Without it macOS kills the
-    app the moment that stream starts instead of prompting.
+  There is deliberately no NSMicrophoneUsageDescription: the microphone fallback was
+  removed, so the app never opens an input stream and never needs that second grant.
 
   LSMinimumSystemVersion is 14.4 because that is where the tap API became dependable; it
   must stay in step with bundle.macOS.minimumSystemVersion and MACOSX_DEPLOYMENT_TARGET.
@@ -18,8 +17,6 @@
   <dict>
     <key>NSAudioCaptureUsageDescription</key>
     <string>VidTranslate reads the audio your Mac is playing so it can transcribe and translate it on screen. Audio is processed on your machine and never recorded.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>VidTranslate can caption your microphone instead of your Mac's audio. Audio is processed on your machine and never recorded.</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.4</string>
     <key>LSUIElement</key>

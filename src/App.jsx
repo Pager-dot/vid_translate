@@ -58,9 +58,6 @@ const DEFAULT_SETTINGS = {
   // cheaper one, because a pass that overruns the 2s step makes the recognizer fall
   // permanently behind the audio. See WHISPER_MODELS below.
   whisperModel: "small",
-  // macOS only: capture the default microphone instead of a virtual loopback device. Set
-  // from the audio setup screen when the user would rather not install a loopback driver.
-  preferMicrophone: false,
 };
 
 /// The Whisper sizes offered, cheapest first. Must stay in step with WHISPER_MODELS in
@@ -505,20 +502,6 @@ function SettingsPanel({ appInfo, draft, setDraft, onSave, onClose, onReset }) {
                       description: m.description,
                     }))}
                     onChange={(value) => upd("whisperModel", value)}
-                  />
-                </SettingsRow>
-              </SettingsCard>
-
-              <SettingsCard title="Audio source">
-                <SettingsRow
-                  label="Capture the microphone"
-                  description="macOS only. Captions what the microphone hears instead of what your Mac is playing — useful when system-audio capture is unavailable."
-                  tight
-                >
-                  <Switch
-                    checked={draft.preferMicrophone}
-                    onChange={(checked) => upd("preferMicrophone", checked)}
-                    aria-label="Capture the microphone"
                   />
                 </SettingsRow>
               </SettingsCard>
@@ -1081,7 +1064,6 @@ export default function App() {
         ollamaKey: settings.ollamaKey || null,
         ollamaModel: settings.ollamaModel || null,
         useLocalTranslation: settings.useLocalTranslation,
-        preferMicrophone: settings.preferMicrophone,
         whisperModel: settings.whisperModel,
       });
     }
@@ -1183,14 +1165,6 @@ export default function App() {
   // server, no `parec`, or no monitor source to read (the normal case in a sandbox). Same
   // two statuses, different words, hence the `os` branch below.
   if (status === "audio_permission_denied" || status === "audio_tap_unavailable") {
-    const useMicrophoneInstead = () => {
-      setSettings((s) => {
-        const next = { ...s, preferMicrophone: true };
-        localStorage.setItem("vt_settings", JSON.stringify(next));
-        return next;
-      });
-      setStatus("idle");
-    };
     const retry = () => {
       setStatus("idle");
       setTimeout(() => toggleRef.current(), 100);
@@ -1207,8 +1181,8 @@ export default function App() {
         ? "VidTranslate stopped receiving audio from your system's output. Check that sound is playing and that PulseAudio or PipeWire is still running, then try again."
         : "macOS needs permission to let VidTranslate hear what your Mac is playing. Allow it under Privacy & Security → Audio Recording, then try again."
       : isLinux
-        ? "VidTranslate could not find a monitor source to record your system audio from. It needs PulseAudio or PipeWire with pulseaudio-utils (`parec`) available. You can caption your microphone instead."
-        : "Capturing system audio needs macOS 14.4 or later. You can caption your microphone instead.";
+        ? "VidTranslate could not find a monitor source to record your system audio from. It needs PulseAudio or PipeWire with pulseaudio-utils (`parec`) available."
+        : "Capturing system audio needs macOS 14.4 or later, which every Apple Silicon Mac can run.";
 
     return (
       <div className="overlay" data-tauri-drag-region>
@@ -1239,15 +1213,6 @@ export default function App() {
               onClick={retry}
             >
               Try again
-            </button>
-            <button
-              type="button"
-              className="overlay-button"
-              onClick={useMicrophoneInstead}
-              title="Caption your microphone instead of system audio"
-            >
-              <Icon name="microphone" />
-              Use microphone
             </button>
           </div>
         </div>
