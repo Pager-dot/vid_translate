@@ -511,6 +511,13 @@ git tag v0.0.7 && git push && git push --tag v0.0.7
 The tag triggers `.github/workflows/release.yml`, which builds all three platforms, signs the
 updater artifacts, assembles `latest.json`, and opens a **draft** release.
 
+> **Re-running the release build by hand needs the tag.** `release.yml` takes a required
+> `tag` input on manual dispatch, and refuses to run on anything that is not a version tag.
+> Dispatching it from a branch used to inherit that branch's name: it attached the release to
+> a tag literally called `main` and skipped `latest.json` entirely, so
+> `releases/latest/download/latest.json` 404ed and every installed copy reported *"could not
+> fetch a valid release JSON from the remote"*. The guard job now fails the run instead.
+
 Nothing reaches users until the draft is published, because the updater endpoint is
 `releases/latest/download/latest.json` and GitHub resolves `/latest` only to a published,
 non-prerelease release. Publishing is therefore the rollout switch — run the **Publish

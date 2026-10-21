@@ -6,7 +6,16 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  # A manual re-run must name the tag it is releasing. It cannot inherit a branch: a
+  # dispatch from `main` once attached the release to a tag literally called "main" and
+  # silently skipped both the version check and latest.json, shipping a release whose
+  # update endpoint 404ed for every platform.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to build and release, e.g. v0.0.10'
+        required: true
+        type: string
 
 # whisper.cpp defaults to GGML_NATIVE=ON (-march=native / AVX-512 on the runner), so the
 # shipped binary crashed with 0xc000001d ILLEGAL_INSTRUCTION on CPUs without AVX-512.
@@ -15,7 +24,31 @@ env:
   GGML_NATIVE: "OFF"
 
 jobs:
+  # Resolves the one tag this run releases, and fails the whole workflow if it is not a
+  # version tag. Everything downstream reads needs.tag.outputs.name rather than
+  # github.ref_name, so a branch name cannot leak into a release again.
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.pick.outputs.tag }}
+    steps:
+      - id: pick
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          case "$tag" in
+            v[0-9]*) ;;
+            *) echo "::error::refusing to release from '$tag' — this workflow releases a version tag like v1.2.3. Re-run it with the tag in the 'tag' input."; exit 1 ;;
+          esac
+          echo "releasing $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: tag
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +69,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.name }}
 
       # libvulkan-dev: on Linux whisper-rs-sys links plain `-lvulkan` with no search path
       # (unlike Windows, it ignores VULKAN_SDK), so the loader's .so must be in the system
@@ -303,12 +338,14 @@ jobs:
   # concurrent jobs each creating a draft would produce duplicate drafts, since a
   # draft has no tag to look up.)
   release:
-    needs: build
+    needs: [tag, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.name }}
 
       - uses: actions/setup-node@v4
         with:
@@ -318,10 +355,9 @@ jobs:
       # pipeline has: latest.json would advertise a version nothing can be downloaded for,
       # or advertise one users already have. Catch it before anything is published.
       - name: Verify the tag matches the version in the tree
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
-          tag="${{ github.ref_name }}"
+          tag="${{ needs.tag.outputs.name }}"
           want="${tag#v}"
           pkg=$(node -p "require('./package.json').version")
           cargo_v=$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{gsub(/[^0-9A-Za-z.+-]/,"",$3); print $3; exit}' src-tauri/Cargo.toml)
@@ -340,15 +376,14 @@ jobs:
       # Tauri validates the whole manifest before comparing versions, so one gap breaks
       # updates everywhere, not just on that platform.
       - name: Assemble latest.json
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: node scripts/make-latest-json.mjs dist "${{ github.ref_name }}"
+        run: node scripts/make-latest-json.mjs dist "${{ needs.tag.outputs.name }}"
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: 'VidTranslate ${{ github.ref_name }}'
+          tag_name: ${{ needs.tag.outputs.name }}
+          name: 'VidTranslate ${{ needs.tag.outputs.name }}'
           draft: true
           prerelease: false
           fail_on_unmatched_files: true
