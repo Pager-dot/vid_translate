@@ -242,20 +242,22 @@ stateDiagram-v2
     checking --> whisper_ja_model_missing: ja, no ggml file
     checking --> whisper_es_model_missing: es, no ggml file
     checking --> ct2_es_model_missing: es + local, no CT2 model
-    checking --> loading: model present
+    checking --> ct2_ja_model_missing: ja two-stage + local,<br/>no CT2 model
+    checking --> loading_model: model present
 
     model_missing --> downloading: download_vosk_model
     whisper_ja_model_missing --> downloading: download_whisper_model
     whisper_es_model_missing --> downloading: download_whisper_model
     ct2_es_model_missing --> downloading: download_ct2_model
+    ct2_ja_model_missing --> downloading: download_ct2_model
 
     downloading --> checking: *_download_progress<br/>status = done
 
-    loading --> listening: model loaded,<br/>on_ready fires
+    loading_model --> listening: model loaded,<br/>on_ready fires
     listening --> audio_permission_denied: watchdog — 6 s of<br/>bit-exact zero samples
     listening --> idle: stop_listening
     audio_permission_denied --> idle: open_audio_privacy_settings
-    audio_tap_unavailable --> idle: unsupported OS
+    audio_tap_unavailable --> idle: Try again
 ```
 
 Everything lands under one directory:
